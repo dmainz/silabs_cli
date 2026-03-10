@@ -1,0 +1,7 @@
+
+{
+    "files.associations": {
+        "*.slconf": "toml",
+        "*.slcc": "yaml"
+    }
+}
