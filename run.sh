@@ -7,6 +7,11 @@ if [ -z "$VIRTUAL_ENV" ] && [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
+# remember original PATH so cleanup script can restore it
+if [ -z "$ORIGINAL_PATH" ]; then
+    export ORIGINAL_PATH="$PATH"
+fi
+
 # Find and parse SLT_CLI from ~/.silabs/slt/slt.location
 SLT_LOCATION_FILE="$HOME/.silabs/slt/slt.location"
 
@@ -56,7 +61,7 @@ if [ -n "$JAVA_PATH" ]; then
     if [ -d "$JAVA_PATH/jre/Contents/Home/bin" ]; then
         export JAVA_HOME="$JAVA_PATH/jre/Contents/Home"
     else
-        export JAVA_HOME="$JAVA_PATH"
+        export JAVA_HOME="$JAVA_PATH/jre"
     fi
 fi
 
@@ -103,6 +108,8 @@ if [ -n "$NINJA_PATH" ]; then
     fi
 fi
 
+PATH_ADDITIONS="$SLC_CLI:$COMMANDER:$PATH_ADDITIONS"
+
 if [ -n "$PATH_ADDITIONS" ]; then
     export PATH="$PATH_ADDITIONS$PATH"
 fi
@@ -116,4 +123,8 @@ fi
 # [ -n "$GCC_ARM_NONE_EABI" ] && echo "  ✓ GCC_ARM_NONE_EABI: $GCC_ARM_NONE_EABI" || echo "  ✗ GCC_ARM_NONE_EABI: Not found"
 
 # Run the CLI
-python3 silabs.py "$@"
+if [ "$#" -eq 0 ]; then
+    echo "Silabs CLI Manager - PATH var set with SLT tool locations"
+else
+    python3 silabs.py "$@"
+fi
