@@ -1,6 +1,8 @@
 # Silabs CLI
 
-A comprehensive command-line interface for Simplicity Studio 6 development, inspired by ESP-IDF's `idf.py` architecture.
+A comprehensive command-line interface for Simplicity Studio 6 development, inspired by ESP-IDF's `idf.py` architecture.  Implements a wrapper script, silabs.py, around Silabs CLI tools slt, slc, and commander.  The goal is to replace the need to use the Simplicity Studio 6 IDE and replace much of the functionality of the Simplicity VSCode extension.  Single step debugging is not implemented in this tool.
+
+NOTE: This project is in it's initial phase and many features are yet to be implemented.
 
 ## Linux Setup
 
