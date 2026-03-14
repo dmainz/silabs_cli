@@ -4,6 +4,9 @@ Command definitions for Silabs CLI
 
 import click
 from pathlib import Path
+from typing import Dict, List, Optional, Any
+import json
+import yaml
 from .config import Config
 from .tools import ToolManager
 from .utils import (
@@ -369,34 +372,173 @@ def component(ctx):
     pass
 
 
-@component.command("list")
-@click.option("--category", help="Filter by category")
-@click.option("--available", is_flag=True, help="Show only available components")
+def _find_component_database() -> Optional[str]:
+    """Find component database file in common locations."""
+    search_paths = [
+        Path.cwd() / "components.json",
+        Path.cwd() / "components.yaml",
+        Path.home() / ".silabs" / "components.json",
+        Path.home() / ".silabs" / "components.yaml",
+    ]
+
+    for path in search_paths:
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _load_component_database(db_path: str) -> Optional[Dict[str, Any]]:
+    """Load component database from file."""
+    try:
+        with open(db_path, 'r', encoding='utf-8') as f:
+            if db_path.endswith('.json'):
+                return json.load(f)
+            elif db_path.endswith('.yaml') or db_path.endswith('.yml'):
+                return yaml.safe_load(f)
+    except Exception as e:
+        print_warning(f"Failed to load component database: {e}")
+    return None
+
+
+def _list_components_by_category(components_data: Dict[str, Any], category: str):
+    """List components in a specific category."""
+    category_components = components_data.get('category_components', {})
+    components = components_data.get('components', {})
+
+    if category not in category_components:
+        print_error(f"Category '{category}' not found")
+        print("Available categories:")
+        for cat in sorted(category_components.keys()):
+            print(f"  {cat}")
+        return
+
+    comp_entries = category_components[category]
+    print_success(f"Components in category '{category}' ({len(comp_entries)} found):")
+
+    # Support both legacy (list of IDs) and new (list of dicts) formats
+    for entry in comp_entries:
+        if isinstance(entry, dict):
+            comp_id = entry.get('id')
+            location = entry.get('location')
+        else:
+            comp_id = entry
+            location = None
+
+        comp_info = components.get(comp_id, {})
+        description = comp_info.get('description', 'No description')
+        quality = comp_info.get('quality', 'unknown')
+
+        print(f"  {comp_id} ({quality})")
+        if description:
+            print(f"    {description}")
+        if location:
+            print(f"    location: {location}")
+        print()
+
+
+def _list_all_components_from_db(components_data: Dict[str, Any]):
+    """List all components from database."""
+    components = components_data.get('components', {})
+    categories = components_data.get('category_components', {})
+
+    print_success(f"All available components ({len(components)} total):")
+
+    # Group by category
+    for category in sorted(categories.keys()):
+        comp_entries = categories[category]
+        if comp_entries:
+            print(f"\n{category} ({len(comp_entries)} components):")
+            for entry in comp_entries:
+                if isinstance(entry, dict):
+                    comp_id = entry.get('id')
+                else:
+                    comp_id = entry
+                comp_info = components.get(comp_id, {})
+                quality = comp_info.get('quality', 'unknown')
+                print(f"  {comp_id} ({quality})")
+
+
+@component.command("build-db")
+@click.option("--output", "-o", default="components.json", help="Output file path")
+@click.option("--format", "-f", type=click.Choice(['json', 'yaml']), default="json", help="Output format")
+@click.option("--limit", "-l", type=int, help="Limit number of components to examine (for testing)")
+@click.option("--sdk", "-s", help="Build database only for specified SDK ID (e.g., '2025.12.1')")
 @click.pass_context
-def component_list(ctx, category, available):
+def component_build_db(ctx, output, format, limit, sdk):
+    """Build component database for enhanced browsing"""
+    import subprocess
+    import sys
+
+    print_success("Building component database...")
+
+    # Check if SLC is available
+    try:
+        result = subprocess.run(['slc', '--version'], capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error("SLC-CLI not found or not working")
+            return
+    except FileNotFoundError:
+        print_error("SLC-CLI not found. Make sure it's installed and in PATH.")
+        return
+
+    # Import and run the database builder
+    try:
+        from build_component_db import build_component_database, save_database
+
+        database = build_component_database(limit=limit, sdk_id=sdk)
+        save_database(database, output, format)
+
+        print_success(f"Component database saved to {output}")
+
+    except ImportError:
+        print_error("build_component_db.py not found. Make sure it's in the project directory.")
+    except Exception as e:
+        print_error(f"Failed to build database: {e}")
+
+
+@component.command("list")
+@click.option("--category", help="Filter by category (e.g., 'Platform|Driver')")
+@click.option("--available", is_flag=True, help="Show only available components")
+@click.option("--database", help="Path to component database file")
+@click.pass_context
+def component_list(ctx, category, available, database):
     """List project components"""
     if not ctx.obj["project_root"]:
         print_error("Not in a Silabs project directory")
         return
-    
+
     project_root = ctx.obj["project_root"]
-    
+
     if available:
-        # Show available components from slc-cli
+        # Try to use component database first
+        if database or _find_component_database():
+            db_path = database or _find_component_database()
+            components_data = _load_component_database(db_path)
+
+            if components_data and category:
+                # Filter by category using database
+                _list_components_by_category(components_data, category)
+                return
+            elif components_data:
+                # Show all available components from database
+                _list_all_components_from_db(components_data)
+                return
+
+        # Fall back to slc-cli
         tool_manager = ctx.obj["tool_manager"]
         slc_path = tool_manager.get_tool_path("slc-cli")
-        
+
         if not slc_path:
             print_error("slc-cli not found")
             return
-        
+
         print_success("Listing available components...")
-        
+
         # Use slc component list command
         cmd = [str(slc_path), "component", "list"]
         if category:
             cmd.extend(["--category", category])
-        
+
         result = run_command(cmd, cwd=project_root)
         if result[0] != 0:
             print_error("Failed to list components")
@@ -407,15 +549,15 @@ def component_list(ctx, category, available):
         if not slcp_config:
             print_error("Could not load project configuration")
             return
-        
+
         print_success("Installed components:")
-        
+
         # Look for components in the configuration
         components = slcp_config.get("component", [])
         if not components:
             print("  No components installed")
             return
-        
+
         for comp in components:
             name = comp.get("name", "unknown")
             version = comp.get("version", "latest")

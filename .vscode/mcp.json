@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"silicon-labs-docs": {
+			"type": "http",
+			"url": "https://silabs.mcp.kapa.ai"
+		}
+	},
+	"inputs": []
+}

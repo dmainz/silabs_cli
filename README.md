@@ -107,6 +107,12 @@ python silabs.py build
 # List available components
 python silabs.py component list
 
+# List components in a specific category
+python silabs.py component list --category "Platform|Driver"
+
+# Build component database for enhanced browsing
+python silabs.py component build-db
+
 # Install a component
 python silabs.py component install bluetooth
 
@@ -119,6 +125,23 @@ python silabs.py monitor
 # Show current configuration
 python silabs.py menuconfig
 ```
+
+## Component Database
+
+For enhanced component browsing, you can build a local database of all available components:
+
+```bash
+# Build component database (JSON format)
+python silabs.py component build-db
+
+# Build with custom output
+python silabs.py component build-db --output my_components.yaml --format yaml
+
+# Or use the standalone script
+python build_component_db.py --output components.json
+```
+
+The database enables fast category-based filtering without querying SLC-CLI repeatedly.
 
 ## Configuration
 
