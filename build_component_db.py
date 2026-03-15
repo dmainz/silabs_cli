@@ -35,7 +35,10 @@ def get_sdk_paths(sdk_id: str) -> List[str]:
         for sdk in sdks:
             if sdk.get('id') == sdk_id:
                 paths = []
+                # Only search the main 'simplicity-sdk' extension for .slcc files
                 for extension in sdk.get('extensions', []):
+                    if extension.get('id') != 'simplicity-sdk':
+                        continue
                     path = extension.get('path')
                     if path:
                         paths.append(path)
@@ -92,22 +95,47 @@ def normalize_component_id(comp_id: str) -> str:
 
 def get_all_component_ids(sdk_id: Optional[str] = None) -> Tuple[List[str], Dict[str, str]]:
     """Get all available component IDs and their .slcc file mappings."""
-    print("Finding and parsing all .slcc files in SDK...")
+    print("Getting component IDs using SLC-CLI and building file mappings...")
 
-    # Determine search paths
+    # Try to get component IDs from SLC; fall back to parsing .slcc files if SLC fails.
+    component_ids = []
+    try:
+        cmd = ["slc", "show-available", "id"]
+        print("Using configured SDK...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            # Parse the output
+            lines = result.stdout.strip().split('\n')
+            parsing = False
+            for line in lines:
+                line = line.strip()
+                if line.startswith("Defined values for id:"):
+                    parsing = True
+                    continue
+                if parsing and line:
+                    component_ids.append(line)
+            print(f"Found {len(component_ids)} component IDs from SLC")
+        else:
+            print(f"Warning: slc show-available id failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        print("Timeout running slc show-available id")
+    except FileNotFoundError:
+        print("SLC command not found; falling back to .slcc file scanning")
+    except Exception as e:
+        print(f"Error running slc show-available id: {e}")
+
+    if not component_ids:
+        print("Falling back to extracting component IDs from .slcc files")
+
+    # Now build id_to_file by finding and parsing .slcc files
     if sdk_id:
-        print(f"Searching SDK '{sdk_id}' only...")
         search_paths = get_sdk_paths(sdk_id)
         if not search_paths:
-            return [], {}
+            return component_ids, {}
     else:
-        print("Searching all SDKs...")
         search_paths = [os.path.expanduser("~/.silabs")]
-
-    # Find all .slcc files in the specified paths
-    import subprocess
     slcc_files = []
-    
+
     for search_path in search_paths:
         try:
             result = subprocess.run(
@@ -116,50 +144,58 @@ def get_all_component_ids(sdk_id: Optional[str] = None) -> Tuple[List[str], Dict
                 text=True,
                 timeout=60
             )
-            
+
             if result.returncode == 0:
                 path_files = result.stdout.strip().split('\n')
                 path_files = [f for f in path_files if f.strip()]
                 slcc_files.extend(path_files)
-                print(f"Found {len(path_files)} .slcc files in {search_path}")
             else:
                 print(f"Warning: find command failed in {search_path}: {result.stderr}")
-                
+
         except subprocess.TimeoutExpired:
             print(f"Timeout searching {search_path}")
         except Exception as e:
             print(f"Error searching {search_path}: {e}")
 
-    print(f"Total .slcc files found: {len(slcc_files)}")
+    print(f"Found {len(slcc_files)} .slcc files")
 
-    component_ids = []
     id_to_file = {}
+    seen_ids = set(component_ids)
 
-    for slcc_file in slcc_files:
+    for idx, slcc_file in enumerate(slcc_files, start=1):
+        # Print a simple progress indicator every 200 files
+        if idx % 200 == 0:
+            print(f"Parsing .slcc files: {idx}/{len(slcc_files)}")
+
         try:
-            # Parse the YAML content to extract the id
             with open(slcc_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+                # Read only the first few lines where the id is expected
+                lines = [next(f, "") for _ in range(30)]
 
-            # Simple YAML parsing for id field (first line should be "id: <component_id>")
-            lines = content.split('\n')
-            for line in lines[:10]:  # Check first 10 lines
+            comp_id = None
+            for line in lines:
                 line = line.strip()
-                if line.startswith('id:'):
-                    comp_id = normalize_component_id(line.split(':', 1)[1])
-                    if comp_id and comp_id not in id_to_file:
-                        component_ids.append(comp_id)
-                        id_to_file[comp_id] = slcc_file
+                # Support both 'id: ...' and '- id: ...' YAML styles
+                if line.startswith('id:') or line.startswith('- id:'):
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        comp_id = normalize_component_id(parts[1])
                     break
 
-        except Exception as e:
-            # Skip files that can't be parsed
+            if not comp_id:
+                continue
+
+            if comp_id not in seen_ids:
+                component_ids.append(comp_id)
+                seen_ids.add(comp_id)
+
+            if comp_id not in id_to_file:
+                id_to_file[comp_id] = slcc_file
+
+        except Exception:
             continue
 
-    # Remove duplicates and sort
-    component_ids = sorted(list(set(component_ids)))
-
-    print(f"Extracted {len(component_ids)} unique component IDs")
+    print(f"Mapped {len(id_to_file)} component IDs to files")
     return component_ids, id_to_file
 
 
@@ -181,13 +217,26 @@ def examine_component(comp_id: str, id_to_file: Dict[str, str]) -> Optional[Dict
         import yaml
         slcc_data = yaml.safe_load(content)
 
+        # Some .slcc files store metadata as a list of dicts (e.g. - category: ...)
+        def find_field(key: str, default=None):
+            # YAML can parse !!omap as a list of (key, value) tuples.
+            if isinstance(slcc_data, dict):
+                return slcc_data.get(key, default)
+            if isinstance(slcc_data, list):
+                for item in slcc_data:
+                    if isinstance(item, dict) and key in item:
+                        return item.get(key, default)
+                    if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == key:
+                        return item[1]
+            return default
+
         component_info = {
             'id': comp_id,
-            'description': slcc_data.get('description', '').strip(),
-            'category': slcc_data.get('category', ''),
-            'quality': slcc_data.get('quality', ''),
-            'provides': slcc_data.get('provides', []) or [],
-            'requires': slcc_data.get('requires', []) or [],
+            'description': str(find_field('description', '')).strip(),
+            'category': str(find_field('category', '')).strip(),
+            'quality': str(find_field('quality', '')).strip(),
+            'provides': find_field('provides', []) or [],
+            'requires': find_field('requires', []) or [],
             'sources': [],
             'includes': [],
             'location': slcc_file
@@ -226,9 +275,13 @@ def get_categories() -> List[str]:
         return []
 
     categories = []
+    parsing = False
     for line in output.split('\n'):
         line = line.strip()
-        if line and not line.startswith('-'):
+        if line.startswith("Defined values for category:"):
+            parsing = True
+            continue
+        if parsing and line:
             categories.append(line)
 
     print(f"Found {len(categories)} categories")
@@ -246,9 +299,6 @@ def build_component_database(limit: int = None, sdk_id: Optional[str] = None) ->
         component_ids = component_ids[:limit]
         print(f"Limited to first {limit} components for testing")
 
-    # Get categories for reference
-    categories = get_categories()
-
     # Examine each component
     components = {}
     total = len(component_ids)
@@ -261,14 +311,21 @@ def build_component_database(limit: int = None, sdk_id: Optional[str] = None) ->
             continue
 
         category = comp_info.get('category', '')
-        if not category or category not in categories:
+        if not category:
+            print(f"Dropping {comp_id} with empty category")
+            dropped += 1
+            continue
+
+        # Skip components with empty category
+        if not category:
+            print(f"Dropping {comp_id} with empty category")
             dropped += 1
             continue
 
         components[comp_id] = comp_info
 
-    # Build category mappings using only SLC categories
-    # Each entry contains id+location so we don't need to lookup separately.
+    # Build category mappings from the discovered components
+    categories = sorted({comp_info.get('category', '') for comp_info in components.values() if comp_info.get('category')})
     category_components = {category: [] for category in categories}
 
     for comp_id, comp_info in components.items():
@@ -289,8 +346,7 @@ def build_component_database(limit: int = None, sdk_id: Optional[str] = None) ->
             'components_dropped': dropped
         },
         'categories': categories,
-        'category_components': category_components,
-        'components': components
+        'category_components': category_components
     }
 
     print(f"Database built with {len(components)} components across {len(categories)} categories (dropped {dropped} components)")

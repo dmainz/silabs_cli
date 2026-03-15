@@ -3,6 +3,9 @@ Command definitions for Silabs CLI
 """
 
 import click
+import curses
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import json
@@ -471,15 +474,13 @@ def component_build_db(ctx, output, format, limit, sdk):
 
     print_success("Building component database...")
 
-    # Check if SLC is available
+    # Check if SLC is available (optional)
     try:
         result = subprocess.run(['slc', '--version'], capture_output=True, text=True)
         if result.returncode != 0:
-            print_error("SLC-CLI not found or not working")
-            return
+            print_warning("SLC-CLI not found or not working; proceeding with .slcc file scanning")
     except FileNotFoundError:
-        print_error("SLC-CLI not found. Make sure it's installed and in PATH.")
-        return
+        print_warning("SLC-CLI not found in PATH; proceeding with .slcc file scanning")
 
     # Import and run the database builder
     try:
@@ -1001,6 +1002,454 @@ def list_targets(ctx):
     
     print()
     print("Note: This is a static list. Full target discovery requires slc-cli.")
+
+
+def get_examples(slc_path: str, env: Dict[str, str]) -> Dict[str, Any]:
+    """Parse slc examples -p output into structured data"""
+    java_home = env.get('JAVA_HOME')
+    if java_home:
+        jar_path = str(Path(slc_path).parent / "slc.jar")
+        cmd = f"{java_home}/bin/java -jar {jar_path} examples -p"
+    else:
+        cmd = f"{slc_path} examples -p"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=env)
+    
+    if result.returncode != 0:
+        print(f"ERROR: Failed to get examples: {result.stderr}", file=sys.stderr)
+        return {}
+    
+    lines = result.stdout.split('\n')
+    
+    examples = {}
+    current_package = None
+    current_quality = None
+    current_workspace = None
+    current_project = None
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        if line.startswith('Package:'):
+            package_name = line.split(':', 1)[1].strip()
+            current_package = package_name
+            examples[current_package] = {}
+        elif line.startswith('Quality:'):
+            quality_name = line.split(':', 1)[1].strip()
+            current_quality = quality_name
+            if current_package:
+                examples[current_package][current_quality] = {'workspaces': {}, 'projects': {}}
+        elif line.startswith('Workspace:'):
+            workspace_part = line.split(':', 1)[1].strip()
+            if ' - ' in workspace_part:
+                workspace_name, workspace_path = workspace_part.split(' - ', 1)
+                workspace_name = workspace_name.strip()
+                workspace_path = workspace_path.strip()
+                if current_package and current_quality and workspace_path.endswith('.slcw'):
+                    examples[current_package][current_quality]['workspaces'][workspace_name] = workspace_path
+            else:
+                current_workspace = workspace_part
+        elif line.startswith('Project:'):
+            project_part = line.split(':', 1)[1].strip()
+            if ' - ' in project_part:
+                project_name, project_path = project_part.split(' - ', 1)
+                project_name = project_name.strip()
+                project_path = project_path.strip()
+                if current_package and current_quality and project_path.endswith('.slcp'):
+                    examples[current_package][current_quality]['projects'][project_name] = project_path
+            else:
+                current_project = project_part
+        elif current_workspace and line.endswith('.slcw'):
+            if current_package and current_quality:
+                examples[current_package][current_quality]['workspaces'][current_workspace] = line
+        elif current_project and line.endswith('.slcp'):
+            if current_package and current_quality:
+                examples[current_package][current_quality]['projects'][current_project] = line
+    
+    return examples
+
+
+def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
+    """Curses UI for example finder"""
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    
+    # Show loading message
+    stdscr.addstr(0, 0, "Generating example list...")
+    stdscr.refresh()
+    
+    # Get examples
+    examples = get_examples(slc_path, env)
+    if not examples:
+        stdscr.addstr(0, 0, "No examples found")
+        stdscr.getch()
+        return
+    
+    # Navigation state
+    state = 'packages'
+    selected_package = None
+    selected_quality = None
+    selected_type = None  # 'workspaces' or 'projects'
+    selected_item = None
+    inputs = {'output_type': 'vscode'}  # default
+    visible_start = 0
+    
+    packages = list(examples.keys())
+    current_idx = 0
+    
+    while True:
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+        
+        if state == 'packages':
+            stdscr.addstr(0, 0, "Select Package:"[:width], curses.A_BOLD)
+            menu_items = packages + ["Quit"]
+            for i, item in enumerate(menu_items):
+                if 2 + i >= height:
+                    break
+                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
+                display = f"  {item}"[:width]
+                stdscr.addstr(2 + i, 0, display, attr)
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP and current_idx > 0:
+                current_idx -= 1
+            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
+                current_idx += 1
+            elif key == ord('\n'):
+                if current_idx < len(packages):
+                    selected_package = packages[current_idx]
+                    state = 'qualities'
+                    qualities = list(examples[selected_package].keys())
+                    current_idx = 0
+                else:
+                    break  # Quit
+            elif key == ord('q'):
+                break
+        
+        elif state == 'qualities':
+            header = f"Package: {selected_package}"[:width]
+            stdscr.addstr(0, 0, header, curses.A_BOLD)
+            stdscr.addstr(1, 0, "Select Quality:"[:width])
+            qualities = list(examples[selected_package].keys())
+            menu_items = qualities + ["Back"]
+            for i, item in enumerate(menu_items):
+                if 3 + i >= height:
+                    break
+                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
+                display = f"  {item}"[:width]
+                stdscr.addstr(3 + i, 0, display, attr)
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP and current_idx > 0:
+                current_idx -= 1
+            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
+                current_idx += 1
+            elif key == ord('\n'):
+                if current_idx < len(qualities):
+                    selected_quality = qualities[current_idx]
+                    state = 'type'
+                    current_idx = 0
+                else:
+                    state = 'packages'
+                    current_idx = packages.index(selected_package)
+            elif key == ord('q'):
+                break
+        
+        elif state == 'type':
+            header = f"Package: {selected_package} > Quality: {selected_quality}"[:width]
+            stdscr.addstr(0, 0, header, curses.A_BOLD)
+            stdscr.addstr(1, 0, "Select Type:"[:width])
+            types = []
+            if examples[selected_package][selected_quality]['projects']:
+                types.append('projects')
+            if examples[selected_package][selected_quality]['workspaces']:
+                types.append('workspaces')
+            
+            menu_items = types + ["Back"]
+            for i, item in enumerate(menu_items):
+                if 3 + i >= height:
+                    break
+                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
+                display_item = item.title() if item != "Back" else item
+                display = f"  {display_item}"[:width]
+                stdscr.addstr(3 + i, 0, display, attr)
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP and current_idx > 0:
+                current_idx -= 1
+            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
+                current_idx += 1
+            elif key == ord('\n'):
+                if current_idx < len(types):
+                    selected_type = types[current_idx]
+                    state = 'items'
+                    items = list(examples[selected_package][selected_quality][selected_type].keys())
+                    current_idx = 0
+                    visible_start = 0
+                else:
+                    state = 'qualities'
+                    visible_start = 0
+                    current_idx = qualities.index(selected_quality)
+                    current_idx = qualities.index(selected_quality)
+            elif key == ord('q'):
+                break
+        
+        elif state == 'items':
+            header = f"Package: {selected_package} > Quality: {selected_quality} > {selected_type.title()}"[:width]
+            stdscr.addstr(0, 0, header, curses.A_BOLD)
+            stdscr.addstr(1, 0, "Select Item:"[:width])
+            items = list(examples[selected_package][selected_quality][selected_type].keys())
+            menu_items = items + ["Back"]
+            visible_count = height - 4
+            display_items = menu_items[visible_start : visible_start + visible_count]
+            for i, item in enumerate(display_items):
+                if 3 + i >= height:
+                    break
+                attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
+                display = f"  {item}"[:width]
+                stdscr.addstr(3 + i, 0, display, attr)
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                if current_idx > 0:
+                    current_idx -= 1
+                    if current_idx < visible_start:
+                        visible_start = current_idx
+            elif key == curses.KEY_DOWN:
+                if current_idx < len(menu_items) - 1:
+                    current_idx += 1
+                    if current_idx >= visible_start + visible_count:
+                        visible_start = max(0, current_idx - visible_count + 1)
+            elif key == ord('\n'):
+                if current_idx < len(items):
+                    selected_item = items[current_idx]
+                    state = 'settings'
+                    current_idx = 0
+                    visible_start = 0
+                else:
+                    state = 'type'
+                    visible_start = 0
+                    types = []
+                    if examples[selected_package][selected_quality]['workspaces']:
+                        types.append('workspaces')
+                    if examples[selected_package][selected_quality]['projects']:
+                        types.append('projects')
+                    current_idx = types.index(selected_type)
+            elif key == ord('q'):
+                break
+        
+        elif state == 'settings':
+            header = f"Selected: {selected_item}"[:width]
+            stdscr.addstr(0, 0, header, curses.A_BOLD)
+            stdscr.addstr(1, 0, "Settings:"[:width])
+            menu_items = [
+                f"Set project name ({inputs.get('project_name', 'default')})",
+                f"Set output type ({inputs.get('output_type', 'vscode')})",
+                f"Set project directory ({inputs.get('project_dir', 'default')})",
+                f"Set board/device ({inputs.get('board_device', 'required')})",
+                f"Set extra switches ({inputs.get('extra_switches', 'none')})",
+                "Generate",
+                "Back"
+            ]
+            visible_count = height - 4
+            display_items = menu_items[visible_start : visible_start + visible_count]
+            for i, item in enumerate(display_items):
+                if 3 + i >= height:
+                    break
+                attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
+                display = f"  {item}"[:width]
+                stdscr.addstr(3 + i, 0, display, attr)
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                if current_idx > 0:
+                    current_idx -= 1
+                    if current_idx < visible_start:
+                        visible_start = current_idx
+            elif key == curses.KEY_DOWN:
+                if current_idx < len(menu_items) - 1:
+                    current_idx += 1
+                    if current_idx >= visible_start + visible_count:
+                        visible_start = max(0, current_idx - visible_count + 1)
+            elif key == ord('\n'):
+                if current_idx == 0:  # Set project name
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Project Name (for -name): ")
+                    curses.echo()
+                    stdscr.refresh()
+                    name = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+                    if name:
+                        inputs['project_name'] = name
+                    curses.noecho()
+                elif current_idx == 1:  # Set output type
+                    output_types = ['cmake', 'iar', 'makefile', 'slsproj', 'vscode']
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Select Output Type (-o):", curses.A_BOLD)
+                    for i, typ in enumerate(output_types):
+                        stdscr.addstr(2 + i, 0, f"{i+1}. {typ}")
+                    stdscr.addstr(8, 0, "Choice (1-5): ")
+                    stdscr.refresh()
+                    choice = stdscr.getch()
+                    if ord('1') <= choice <= ord('5'):
+                        inputs['output_type'] = output_types[choice - ord('1')]
+                elif current_idx == 2:  # Set project directory
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Project Directory (-d): ")
+                    curses.echo()
+                    stdscr.refresh()
+                    dir_ = stdscr.getstr(0, 25, 100).decode('utf-8').strip()
+                    if dir_:
+                        inputs['project_dir'] = dir_
+                    curses.noecho()
+                elif current_idx == 3:  # Set board/device
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Board/Device (--with): ")
+                    curses.echo()
+                    stdscr.refresh()
+                    bd = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+                    if bd:
+                        inputs['board_device'] = bd
+                    curses.noecho()
+                elif current_idx == 4:  # Set extra switches
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Extra Switches: ")
+                    curses.echo()
+                    stdscr.refresh()
+                    extra = stdscr.getstr(0, 18, 100).decode('utf-8').strip()
+                    if extra:
+                        inputs['extra_switches'] = extra
+                    curses.noecho()
+                elif current_idx == 5:  # Generate
+                    if inputs.get('board_device'):
+                        generate_command(slc_path, examples[selected_package][selected_quality][selected_type][selected_item], inputs, env)
+                        break
+                    else:
+                        stdscr.clear()
+                        stdscr.addstr(0, 0, "Board/Device is required. Press any key to continue.")
+                        stdscr.refresh()
+                        stdscr.getch()
+                elif current_idx == 6:  # Back
+                    state = 'items'
+                    current_idx = items.index(selected_item)
+                    visible_start = max(0, current_idx - visible_count + 1)
+            elif key == ord('q'):
+                break
+        
+        stdscr.refresh()
+
+
+def get_user_inputs(stdscr, example_path: str) -> Optional[Dict[str, str]]:
+    """Get user inputs for project generation"""
+    curses.echo()
+    height, width = stdscr.getmaxyx()
+    
+    inputs = {}
+    
+    # Project name
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Project Name (for -name): ")
+    stdscr.refresh()
+    inputs['project_name'] = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+    
+    # Project output type
+    output_types = ['cmake', 'iar', 'makefile', 'slsproj', 'vscode']
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Select Output Type (-o):", curses.A_BOLD)
+    for i, typ in enumerate(output_types):
+        stdscr.addstr(2 + i, 0, f"{i+1}. {typ}")
+    stdscr.addstr(8, 0, "Choice (1-5): ")
+    stdscr.refresh()
+    choice = stdscr.getch()
+    if ord('1') <= choice <= ord('5'):
+        inputs['output_type'] = output_types[choice - ord('1')]
+    else:
+        return None
+    
+    # Project directory
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Project Directory (-d): ")
+    stdscr.refresh()
+    inputs['project_dir'] = stdscr.getstr(0, 25, 100).decode('utf-8').strip()
+    
+    # Board/Device
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Board/Device (--with): ")
+    stdscr.refresh()
+    inputs['board_device'] = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+    
+    # Extra switches
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Extra Switches: ")
+    stdscr.refresh()
+    inputs['extra_switches'] = stdscr.getstr(0, 18, 100).decode('utf-8').strip()
+    
+    curses.noecho()
+    return inputs
+
+
+def generate_command(slc_path: str, example_path: str, inputs: Dict[str, str], env: Dict[str, str]):
+    """Generate the slc command"""
+    # Set default project_dir if not set
+    if not inputs.get('project_dir'):
+        project_name = Path(example_path).stem
+        inputs['project_dir'] = project_name
+    
+    java_home = env.get('JAVA_HOME')
+    if java_home:
+        jar_path = str(Path(slc_path).parent / "slc.jar")
+        cmd = f"{java_home}/bin/java -jar {jar_path} generate \"{example_path}\" -np -cp"
+    else:
+        cmd = f"{slc_path} generate \"{example_path}\" -np -cp"
+    
+    if inputs.get('project_name'):
+        cmd += f" -name \"{inputs['project_name']}\""
+    
+    if inputs.get('output_type'):
+        cmd += f" -o {inputs['output_type']}"
+    
+    if inputs.get('project_dir'):
+        cmd += f" -d \"{inputs['project_dir']}\""
+    
+    if inputs.get('board_device'):
+        cmd += f" --with {inputs['board_device']}"
+    
+    if inputs.get('extra_switches'):
+        cmd += f" {inputs['extra_switches']}"
+    
+    with open("last_slc_command.txt", "w") as f:
+        f.write(cmd + "\n")
+    print(f"Running: {cmd} (command saved to last_slc_command.txt)")
+    result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
+    if result.returncode == 0:
+        print_success("Project generated successfully")
+    else:
+        print_error("Project generation failed")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        with open("last_slc_output.txt", "w") as f:
+            f.write("Command:\n" + cmd + "\n\nSTDOUT:\n" + result.stdout + "\n\nSTDERR:\n" + result.stderr + "\n")
+
+
+@silabs.command()
+@click.pass_context
+def generate_example(ctx):
+    """Interactive example project generator"""
+    print("Starting generate-example")
+    tool_manager = ctx.obj["tool_manager"]
+    
+    # Get SLC path
+    slc_path = tool_manager.get_tool_path("slc-cli")
+    if not slc_path:
+        print_error("SLC-CLI not found in configuration")
+        return
+    
+    # Get environment
+    env = tool_manager.get_environment()
+    
+    # Launch the curses UI
+    curses.wrapper(example_finder_ui, slc_path, env)
 
 
 @silabs.command()

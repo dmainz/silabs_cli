@@ -100,7 +100,25 @@ class ToolManager:
         """Get Java home directory"""
         java_path = self.get_tool_path("java21")
         if java_path:
+            # Check for Contents/Home (macOS JRE)
+            contents_home = Path(java_path) / "jre" / "Contents" / "Home"
+            if contents_home.exists():
+                return str(contents_home)
+            # Check for jre/Contents/Home
+            jre_contents_home = Path(java_path) / "Contents" / "Home"
+            if jre_contents_home.exists():
+                return str(jre_contents_home)
+            # Fallback to jre
+            jre_path = Path(java_path) / "jre"
+            if jre_path.exists():
+                return str(jre_path)
             return java_path
+        
+        # Fallback to Simplicity Studio JRE
+        ss_jre = Path.home() / ".silabs" / "slt" / "installs" / "archive" / "v6-base-v6.1.2-230" / "SimplicityStudio-6.app" / "Contents" / "Eclipse" / "sts_back_end.app" / "Contents" / "Eclipse" / "plugins" / "org.eclipse.justj.openjdk.hotspot.jre.full.stripped.macosx.aarch64_21.0.6.v20250130-0529" / "jre"
+        if ss_jre.exists():
+            return str(ss_jre)
+        
         return None
     
     def validate_tools(self) -> Dict[str, bool]:
