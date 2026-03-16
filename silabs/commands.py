@@ -6,6 +6,7 @@ import click
 import curses
 import subprocess
 import sys
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import json
@@ -487,6 +488,11 @@ def component_build_db(ctx, output, format, limit, sdk):
         from build_component_db import build_component_database, save_database
 
         database = build_component_database(limit=limit, sdk_id=sdk)
+        
+        # Use SDK-specific filename if SDK is specified
+        if sdk:
+            output = f".components-{sdk}.json"
+        
         save_database(database, output, format)
 
         print_success(f"Component database saved to {output}")
@@ -1070,9 +1076,10 @@ def get_examples(slc_path: str, env: Dict[str, str]) -> Dict[str, Any]:
     return examples
 
 
-def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
+def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: Optional[str] = None, component_db: Optional[Dict[str, Any]] = None):
     """Curses UI for example finder"""
     curses.curs_set(0)
+    curses.set_escdelay(25)  # make ESC key responsive (avoid needing 2 presses)
     stdscr.keypad(True)
     
     # Show loading message
@@ -1086,8 +1093,21 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
         stdscr.getch()
         return
     
+    # Get available SDKs
+    import os
+    available_sdks = []
+    sdks_json_path = os.path.expanduser("~/.silabs/sdks.json")
+    if os.path.exists(sdks_json_path):
+        try:
+            with open(sdks_json_path, 'r') as f:
+                sdks_data = json.load(f)
+            available_sdks = [sdk.get('id') for sdk in sdks_data if sdk.get('id')]
+        except Exception:
+            pass
+    
     # Navigation state
     state = 'packages'
+    selected_sdk = default_sdk
     selected_package = None
     selected_quality = None
     selected_type = None  # 'workspaces' or 'projects'
@@ -1103,28 +1123,68 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
         height, width = stdscr.getmaxyx()
         
         if state == 'packages':
-            stdscr.addstr(0, 0, "Select Package:"[:width], curses.A_BOLD)
-            menu_items = packages + ["Quit"]
-            for i, item in enumerate(menu_items):
-                if 2 + i >= height:
-                    break
+            stdscr.addstr(0, 0, f"SDK: ({selected_sdk or 'none'})"[:width])
+            stdscr.addstr(3, 0, "Select Package:"[:width], curses.A_BOLD)
+            menu_items = ["Change SDK", "Quit"] + packages
+            package_start_line = 4
+            max_packages_display = height - package_start_line
+            
+            # Display fixed items (Change SDK and Quit)
+            for i in range(2):
                 attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                display = f"  {item}"[:width]
-                stdscr.addstr(2 + i, 0, display, attr)
+                display = f"  {menu_items[i]}"[:width]
+                stdscr.addstr(1 + i, 0, display, attr)
+            
+            # Display packages
+            display_packages = packages[visible_start : visible_start + max_packages_display]
+            for j, package in enumerate(display_packages):
+                menu_idx = 2 + visible_start + j
+                attr = curses.A_REVERSE if menu_idx == current_idx else curses.A_NORMAL
+                display = f"  {package}"[:width]
+                stdscr.addstr(package_start_line + j, 0, display, attr)
+            
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  q: quit  s: change SDK"[:width])
             
             key = stdscr.getch()
-            if key == curses.KEY_UP and current_idx > 0:
-                current_idx -= 1
-            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
-                current_idx += 1
+            if key == curses.KEY_UP:
+                if current_idx > 0:
+                    current_idx -= 1
+                    if current_idx >= 2 and current_idx - 2 < visible_start:
+                        visible_start = current_idx - 2
+            elif key == curses.KEY_DOWN:
+                if current_idx < len(menu_items) - 1:
+                    current_idx += 1
+                    if current_idx >= 2:
+                        package_idx = current_idx - 2
+                        if package_idx >= visible_start + max_packages_display:
+                            visible_start = max(0, package_idx - max_packages_display + 1)
             elif key == ord('\n'):
-                if current_idx < len(packages):
-                    selected_package = packages[current_idx]
+                if current_idx == 0:  # Change SDK
+                    if available_sdks:
+                        state = 'change_sdk'
+                        current_idx = 0
+                        visible_start = 0
+                    else:
+                        stdscr.addstr(height-1, 0, "No SDKs available"[:width])
+                        stdscr.refresh()
+                        stdscr.getch()
+                elif current_idx == 1:  # Quit
+                    break
+                else:  # Package
+                    selected_package = packages[current_idx - 2]
                     state = 'qualities'
                     qualities = list(examples[selected_package].keys())
                     current_idx = 0
+                    visible_start = 0
+            elif key == ord('s') or key == ord('S'):
+                if available_sdks:
+                    state = 'change_sdk'
+                    current_idx = 0
+                    visible_start = 0
                 else:
-                    break  # Quit
+                    stdscr.addstr(height-1, 0, "No SDKs available"[:width])
+                    stdscr.refresh()
+                    stdscr.getch()
             elif key == ord('q'):
                 break
         
@@ -1141,6 +1201,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                 display = f"  {item}"[:width]
                 stdscr.addstr(3 + i, 0, display, attr)
             
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
+            
             key = stdscr.getch()
             if key == curses.KEY_UP and current_idx > 0:
                 current_idx -= 1
@@ -1153,7 +1215,14 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                     current_idx = 0
                 else:
                     state = 'packages'
-                    current_idx = packages.index(selected_package)
+                    current_idx = packages.index(selected_package) + 2
+                    max_packages_display = height - 4
+                    visible_start = max(0, (current_idx - 2) - max_packages_display + 1)
+            elif key == ord('b') or key == ord('B'):
+                state = 'packages'
+                current_idx = packages.index(selected_package) + 2
+                max_packages_display = height - 4
+                visible_start = max(0, (current_idx - 2) - max_packages_display + 1)
             elif key == ord('q'):
                 break
         
@@ -1176,6 +1245,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                 display = f"  {display_item}"[:width]
                 stdscr.addstr(3 + i, 0, display, attr)
             
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
+            
             key = stdscr.getch()
             if key == curses.KEY_UP and current_idx > 0:
                 current_idx -= 1
@@ -1192,7 +1263,10 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                     state = 'qualities'
                     visible_start = 0
                     current_idx = qualities.index(selected_quality)
-                    current_idx = qualities.index(selected_quality)
+            elif key == ord('b') or key == ord('B'):
+                state = 'qualities'
+                visible_start = 0
+                current_idx = qualities.index(selected_quality)
             elif key == ord('q'):
                 break
         
@@ -1201,7 +1275,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
             stdscr.addstr(0, 0, header, curses.A_BOLD)
             stdscr.addstr(1, 0, "Select Item:"[:width])
             items = list(examples[selected_package][selected_quality][selected_type].keys())
-            menu_items = items + ["Back"]
+            menu_items = ["Back"] + items
             visible_count = height - 4
             display_items = menu_items[visible_start : visible_start + visible_count]
             for i, item in enumerate(display_items):
@@ -1210,6 +1284,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                 attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
                 display = f"  {item}"[:width]
                 stdscr.addstr(3 + i, 0, display, attr)
+            
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
             
             key = stdscr.getch()
             if key == curses.KEY_UP:
@@ -1223,12 +1299,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                     if current_idx >= visible_start + visible_count:
                         visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('\n'):
-                if current_idx < len(items):
-                    selected_item = items[current_idx]
-                    state = 'settings'
-                    current_idx = 0
-                    visible_start = 0
-                else:
+                if current_idx == 0:  # Back
                     state = 'type'
                     visible_start = 0
                     types = []
@@ -1237,6 +1308,20 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                     if examples[selected_package][selected_quality]['projects']:
                         types.append('projects')
                     current_idx = types.index(selected_type)
+                else:  # Items
+                    selected_item = items[current_idx - 1]  # -1 because Back is at index 0
+                    state = 'settings'
+                    current_idx = 0
+                    visible_start = 0
+            elif key == ord('b') or key == ord('B'):
+                state = 'type'
+                visible_start = 0
+                types = []
+                if examples[selected_package][selected_quality]['workspaces']:
+                    types.append('workspaces')
+                if examples[selected_package][selected_quality]['projects']:
+                    types.append('projects')
+                current_idx = types.index(selected_type)
             elif key == ord('q'):
                 break
         
@@ -1245,13 +1330,13 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
             stdscr.addstr(0, 0, header, curses.A_BOLD)
             stdscr.addstr(1, 0, "Settings:"[:width])
             menu_items = [
+                "Back",
                 f"Set project name ({inputs.get('project_name', 'default')})",
                 f"Set output type ({inputs.get('output_type', 'vscode')})",
                 f"Set project directory ({inputs.get('project_dir', 'default')})",
                 f"Set board/device ({inputs.get('board_device', 'required')})",
                 f"Set extra switches ({inputs.get('extra_switches', 'none')})",
-                "Generate",
-                "Back"
+                "Generate"
             ]
             visible_count = height - 4
             display_items = menu_items[visible_start : visible_start + visible_count]
@@ -1262,6 +1347,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                 display = f"  {item}"[:width]
                 stdscr.addstr(3 + i, 0, display, attr)
             
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
+            
             key = stdscr.getch()
             if key == curses.KEY_UP:
                 if current_idx > 0:
@@ -1274,54 +1361,70 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                     if current_idx >= visible_start + visible_count:
                         visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('\n'):
-                if current_idx == 0:  # Set project name
+                if current_idx == 0:  # Back
+                    state = 'items'
+                    current_idx = items.index(selected_item) + 1  # +1 because Back is at index 0
+                    visible_start = max(0, current_idx - visible_count + 1)
+                elif current_idx == 1:  # Set project name
                     stdscr.clear()
                     stdscr.addstr(0, 0, "Project Name (for -name): ")
+                    curses.curs_set(1)
                     curses.echo()
                     stdscr.refresh()
                     name = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
                     if name:
                         inputs['project_name'] = name
                     curses.noecho()
-                elif current_idx == 1:  # Set output type
+                    curses.curs_set(0)
+                elif current_idx == 2:  # Set output type
                     output_types = ['cmake', 'iar', 'makefile', 'slsproj', 'vscode']
-                    stdscr.clear()
-                    stdscr.addstr(0, 0, "Select Output Type (-o):", curses.A_BOLD)
-                    for i, typ in enumerate(output_types):
-                        stdscr.addstr(2 + i, 0, f"{i+1}. {typ}")
-                    stdscr.addstr(8, 0, "Choice (1-5): ")
-                    stdscr.refresh()
-                    choice = stdscr.getch()
-                    if ord('1') <= choice <= ord('5'):
-                        inputs['output_type'] = output_types[choice - ord('1')]
-                elif current_idx == 2:  # Set project directory
+                    output_idx = 0
+                    while True:
+                        stdscr.clear()
+                        height, width = stdscr.getmaxyx()
+                        stdscr.addstr(0, 0, "Select Output Type (-o):"[:width], curses.A_BOLD)
+                        for i, typ in enumerate(output_types):
+                            attr = curses.A_REVERSE if i == output_idx else curses.A_NORMAL
+                            stdscr.addstr(2 + i, 0, f"  {typ}"[:width], attr)
+                        stdscr.addstr(height-2, 0, "↑/↓: Navigate  Enter: Select  Esc: Cancel"[:width])
+                        stdscr.refresh()
+                        key = stdscr.getch()
+                        if key == curses.KEY_UP and output_idx > 0:
+                            output_idx -= 1
+                        elif key == curses.KEY_DOWN and output_idx < len(output_types) - 1:
+                            output_idx += 1
+                        elif key == ord('\n'):
+                            inputs['output_type'] = output_types[output_idx]
+                            break
+                        elif key == 27:  # Escape
+                            break
+                elif current_idx == 3:  # Set project directory
                     stdscr.clear()
                     stdscr.addstr(0, 0, "Project Directory (-d): ")
+                    curses.curs_set(1)
                     curses.echo()
                     stdscr.refresh()
                     dir_ = stdscr.getstr(0, 25, 100).decode('utf-8').strip()
                     if dir_:
                         inputs['project_dir'] = dir_
                     curses.noecho()
-                elif current_idx == 3:  # Set board/device
-                    stdscr.clear()
-                    stdscr.addstr(0, 0, "Board/Device (--with): ")
-                    curses.echo()
-                    stdscr.refresh()
-                    bd = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
-                    if bd:
-                        inputs['board_device'] = bd
-                    curses.noecho()
-                elif current_idx == 4:  # Set extra switches
+                    curses.curs_set(0)
+                elif current_idx == 4:  # Set board/device
+                    selected_bd = select_board_device(stdscr, component_db, inputs.get('board_device', ''))
+                    if selected_bd:
+                        inputs['board_device'] = selected_bd
+                elif current_idx == 5:  # Set extra switches
                     stdscr.clear()
                     stdscr.addstr(0, 0, "Extra Switches: ")
+                    curses.curs_set(1)
                     curses.echo()
                     stdscr.refresh()
                     extra = stdscr.getstr(0, 18, 100).decode('utf-8').strip()
                     if extra:
                         inputs['extra_switches'] = extra
                     curses.noecho()
-                elif current_idx == 5:  # Generate
+                    curses.curs_set(0)
+                elif current_idx == 6:  # Generate
                     if inputs.get('board_device'):
                         generate_command(slc_path, examples[selected_package][selected_quality][selected_type][selected_item], inputs, env)
                         break
@@ -1330,12 +1433,74 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str]):
                         stdscr.addstr(0, 0, "Board/Device is required. Press any key to continue.")
                         stdscr.refresh()
                         stdscr.getch()
-                elif current_idx == 6:  # Back
-                    state = 'items'
-                    current_idx = items.index(selected_item)
-                    visible_start = max(0, current_idx - visible_count + 1)
+            elif key == ord('b') or key == ord('B'):
+                state = 'items'
+                current_idx = items.index(selected_item) + 1  # +1 because Back is at index 0
+                visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('q'):
                 break
+        
+        elif state == 'change_sdk':
+            stdscr.addstr(0, 0, "Select SDK:"[:width], curses.A_BOLD)
+            if selected_sdk:
+                stdscr.addstr(1, 0, f"Current: {selected_sdk}"[:width])
+            menu_items = ["Back"] + available_sdks
+            visible_count = height - 4
+            display_items = menu_items[visible_start : visible_start + visible_count]
+            for i, item in enumerate(display_items):
+                if 3 + i >= height:
+                    break
+                attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
+                display = f"  {item}"[:width]
+                stdscr.addstr(3 + i, 0, display, attr)
+            
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
+            
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                if current_idx > 0:
+                    current_idx -= 1
+                    if current_idx < visible_start:
+                        visible_start = current_idx
+            elif key == curses.KEY_DOWN:
+                if current_idx < len(menu_items) - 1:
+                    current_idx += 1
+                    if current_idx >= visible_start + visible_count:
+                        visible_start = max(0, current_idx - visible_count + 1)
+            elif key == ord('\n'):
+                if current_idx == 0:  # Back
+                    state = 'packages'
+                    current_idx = 0
+                    visible_start = 0
+                else:  # SDK selection
+                    new_sdk = available_sdks[current_idx - 1]  # -1 because Back is at index 0
+                    if new_sdk != selected_sdk:
+                        selected_sdk = new_sdk
+                        # Reload component database for new SDK
+                        db_path = f".components-{selected_sdk}.json"
+                        if os.path.exists(db_path):
+                            try:
+                                with open(db_path, 'r') as f:
+                                    component_db = json.load(f)
+                                stdscr.addstr(height-1, 0, f"Loaded component database for {selected_sdk}"[:width])
+                            except Exception:
+                                component_db = None
+                        else:
+                            component_db = None
+                            stdscr.addstr(height-1, 0, f"Component database not found for {selected_sdk}"[:width])
+                        stdscr.refresh()
+                        stdscr.getch()
+                    state = 'packages'
+                    current_idx = 0
+                    visible_start = 0
+            elif key == ord('b') or key == ord('B'):
+                state = 'packages'
+                current_idx = 0
+                visible_start = 0
+            elif key == ord('q'):
+                state = 'packages'
+                current_idx = 0
+                visible_start = 0
         
         stdscr.refresh()
 
@@ -1432,6 +1597,170 @@ def generate_command(slc_path: str, example_path: str, inputs: Dict[str, str], e
             f.write("Command:\n" + cmd + "\n\nSTDOUT:\n" + result.stdout + "\n\nSTDERR:\n" + result.stderr + "\n")
 
 
+def select_board_device(stdscr, component_db: Optional[Dict[str, Any]], current_selection: str = "") -> Optional[str]:
+    """Interactive board/device selector from component database"""
+    if not component_db:
+        # Fallback to text input
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Board/Device (--with): ")
+        curses.echo()
+        stdscr.refresh()
+        bd = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+        curses.noecho()
+        return bd if bd else None
+    
+    # Get board and device components
+    board_components = []
+    device_components = []
+    
+    category_components = component_db.get('category_components', {})
+    for category, components in category_components.items():
+        # Skip config categories
+        if 'config' in category.lower():
+            continue
+        if 'board' in category.lower():
+            board_components.extend([comp['id'] for comp in components if not comp['id'].endswith('_config')])
+        elif 'device' in category.lower():
+            device_components.extend([comp['id'] for comp in components if not comp['id'].endswith('_config')])
+    
+    all_components = sorted(set(board_components + device_components))
+    
+    # Filter out config components
+    all_components = [comp for comp in all_components if not comp.endswith('_config')]
+    
+    if not all_components:
+        # Fallback to text input
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Board/Device (--with): ")
+        curses.curs_set(1)
+        curses.echo()
+        stdscr.refresh()
+        bd = stdscr.getstr(0, 25, 50).decode('utf-8').strip()
+        curses.noecho()
+        curses.curs_set(0)
+        return bd if bd else None
+    
+    # Search/filter interface
+    search_term = ""
+    filtered_components = all_components
+    current_idx = 0
+    visible_start = 0
+    
+    # Enable cursor for search input
+    curses.curs_set(1)
+    
+    while True:
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+        
+        # Ensure cursor is visible
+        curses.curs_set(1)
+        
+        stdscr.addstr(0, 0, "Select Board/Device (type to search):"[:width], curses.A_BOLD)
+        stdscr.addstr(1, 0, f"Search: {search_term}"[:width])
+        stdscr.move(1, min(width-1, len(f"Search: {search_term}")))
+        stdscr.addstr(2, 0, f"Found {len(filtered_components)} components"[:width])
+        
+        visible_count = height - 5
+        display_items = filtered_components[visible_start : visible_start + visible_count]
+        
+        for i, item in enumerate(display_items):
+            if 4 + i >= height:
+                break
+            attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
+            display = f"  {item}"[:width]
+            stdscr.addstr(4 + i, 0, display, attr)
+        
+        stdscr.addstr(height-2, 0, "↑/↓: Navigate  Enter: Select  Backspace: Delete  Esc: Cancel"[:width])
+        
+        # Keep cursor on the search input line so it remains visible while typing
+        stdscr.move(1, min(width-1, len(f"Search: {search_term}")))
+        
+        stdscr.refresh()
+        
+        key = stdscr.getch()
+        
+        if key == curses.KEY_UP:
+            if current_idx > 0:
+                current_idx -= 1
+                if current_idx < visible_start:
+                    visible_start = current_idx
+        elif key == curses.KEY_DOWN:
+            if current_idx < len(filtered_components) - 1:
+                current_idx += 1
+                if current_idx >= visible_start + visible_count:
+                    visible_start = max(0, current_idx - visible_count + 1)
+        elif key == ord('\n'):  # Enter
+            if filtered_components:
+                curses.curs_set(0)
+                return filtered_components[current_idx]
+        elif key == 27:  # Escape
+            curses.curs_set(0)
+            return None
+        elif key == ord('\b') or key == 127:  # Backspace
+            if search_term:
+                search_term = search_term[:-1]
+                filtered_components = [comp for comp in all_components if search_term.lower() in comp.lower()]
+                current_idx = 0
+                visible_start = 0
+        elif 32 <= key <= 126:  # Printable characters
+            search_term += chr(key)
+            filtered_components = [comp for comp in all_components if search_term.lower() in comp.lower()]
+            current_idx = 0
+            visible_start = 0
+        
+        stdscr.refresh()
+
+
+def get_default_sdk() -> Optional[str]:
+    """Get the default SDK ID from configuration or environment."""
+    import os
+    import json
+    
+    # First, try to get from slconf file
+    slconf_path = Path("project.slconf")
+    if slconf_path.exists():
+        try:
+            import toml
+            with open(slconf_path, 'r') as f:
+                config = toml.load(f)
+            
+            sdk_paths = config.get('slc', {}).get('sdk-package-path', [])
+            if sdk_paths:
+                sdk_path = sdk_paths[0]  # Use the first one
+                
+                # Look up the SDK ID from sdks.json
+                sdks_json_path = os.path.expanduser("~/.silabs/sdks.json")
+                if os.path.exists(sdks_json_path):
+                    with open(sdks_json_path, 'r') as f:
+                        sdks = json.load(f)
+                    
+                    for sdk in sdks:
+                        for extension in sdk.get('extensions', []):
+                            if extension.get('id') == 'simplicity-sdk' and extension.get('path') == sdk_path:
+                                return sdk.get('id')
+        except Exception as e:
+            print(f"Warning: Could not read SDK from slconf: {e}")
+    
+    # Fallback: try slc summarize-sdk if available
+    try:
+        result = subprocess.run(['slc', 'summarize-sdk'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            # Parse the output to extract SDK ID
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if 'SDK:' in line or 'ID:' in line:
+                    parts = line.split(':')
+                    if len(parts) > 1:
+                        sdk_id = parts[1].strip()
+                        if sdk_id:
+                            return sdk_id
+    except Exception:
+        pass
+    
+    return None
+
+
 @silabs.command()
 @click.pass_context
 def generate_example(ctx):
@@ -1448,8 +1777,30 @@ def generate_example(ctx):
     # Get environment
     env = tool_manager.get_environment()
     
+    # Get default SDK
+    default_sdk = get_default_sdk()
+    if not default_sdk:
+        print_warning("Could not detect default SDK. Component database will not be available.")
+        component_db = None
+    else:
+        print(f"Using SDK: {default_sdk}")
+        
+        # Load or create component database for this SDK
+        db_path = f".components-{default_sdk}.json"
+        if os.path.exists(db_path):
+            print(f"Loading component database from {db_path}")
+            try:
+                with open(db_path, 'r') as f:
+                    component_db = json.load(f)
+            except Exception as e:
+                print_warning(f"Could not load component database: {e}")
+                component_db = None
+        else:
+            print(f"Component database not found at {db_path}. Run 'silabs component build-db --sdk {default_sdk}' to create it.")
+            component_db = None
+    
     # Launch the curses UI
-    curses.wrapper(example_finder_ui, slc_path, env)
+    curses.wrapper(example_finder_ui, slc_path, env, default_sdk, component_db)
 
 
 @silabs.command()
