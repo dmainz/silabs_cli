@@ -1,5 +1,18 @@
 #!/bin/bash
-# Run script for Silabs CLI Manager - Generic configuration using slt
+# DEPRECATED: Use start_cli.sh instead
+#
+# This script has been replaced by start_cli.sh which combines the functionality
+# of both run.sh and setup_linux.sh into a single, unified startup script.
+#
+# To initialize your Silabs CLI environment, run:
+#   source ./scripts/start_cli.sh
+#
+# This file is kept for reference only.
+
+exit 1
+
+# Original content below (deprecated):
+# ===================================
 
 # Activate virtual environment if it exists and not already in a venv
 if [ -z "$VIRTUAL_ENV" ] && [ -d "venv" ]; then
@@ -121,10 +134,3 @@ fi
 # [ -n "$CMAKE" ] && echo "  ✓ CMAKE: $CMAKE" || echo "  ✗ CMAKE: Not found"
 # [ -n "$NINJA" ] && echo "  ✓ NINJA: $NINJA" || echo "  ✗ NINJA: Not found"
 # [ -n "$GCC_ARM_NONE_EABI" ] && echo "  ✓ GCC_ARM_NONE_EABI: $GCC_ARM_NONE_EABI" || echo "  ✗ GCC_ARM_NONE_EABI: Not found"
-
-# Run the CLI
-if [ "$#" -eq 0 ]; then
-    echo "Silabs CLI Manager - PATH var set with SLT tool locations"
-else
-    python3 silabs.py "$@"
-fi

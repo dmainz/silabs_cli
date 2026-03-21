@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# DEPRECATED: Use start_cli.sh instead
+#
+# This script has been replaced by start_cli.sh which combines the functionality
+# of both run.sh and setup_linux.sh into a single, unified startup script.
+#
+# To initialize your Silabs CLI environment, run:
+#   source ./scripts/start_cli.sh
+#
+# This file is kept for reference only.
+
+exit 1
+
+# Original content below (deprecated):
+# ===================================
+
 # Silabs CLI Setup Script for Linux
 # This script sets up a Python virtual environment and installs dependencies
 
@@ -59,37 +74,9 @@ python -m pip install -r requirements.txt
 echo "✅ Verifying installation..."
 python -c "import click, toml, yaml; print('All dependencies installed successfully!')"
 
-# Create activation script for convenience
-cat > activate.sh << 'EOF'
-#!/bin/bash
-# Activation script for Silabs CLI
-echo "🔧 Activating Silabs CLI environment..."
-source venv/bin/activate
-echo "✅ Environment activated. You can now run:"
-echo "   python silabs.py --help"
-echo "   ./run.sh --help  (with automatic tool path detection)"
-echo ""
-echo "To use with automatic Silabs tool detection:"
-echo "   1. Make sure Silabs tools are installed on your system"
-echo "   2. Run: ./run.sh <command>"
-echo ""
-echo "💡 To deactivate, run: deactivate"
-EOF
-
-chmod +x activate.sh
-
-# Test the CLI
-echo "🧪 Testing CLI..."
-python silabs.py --help | head -5
-
 echo ""
 echo "🎉 Setup complete!"
 echo ""
-echo "To use the Silabs CLI:"
-echo "  1. Run: source activate.sh"
-echo "  2. Then: python silabs.py --help"
+echo "To use the Silabs CLI type ** silabs.py --help ** for usage instructions."
+echo "To exit the Silabs CLI source the ** quit_cli.sh ** script."
 echo ""
-echo "Or run directly:"
-echo "  source venv/bin/activate && python silabs.py --help"
-echo ""
-echo "Happy coding! 🚀"
