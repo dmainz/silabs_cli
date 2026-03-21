@@ -461,6 +461,22 @@ def _list_all_components_from_db(components_data: Dict[str, Any]):
                 quality = comp_info.get('quality', 'unknown')
                 print(f"  {comp_id} ({quality})")
 
+def build_database(output,format = "json",limit = None,sdk = None):
+    # Import and run the database builder
+    try:
+        from build_component_db import build_component_database, save_database
+
+        database = build_component_database(limit=limit, sdk_id=sdk)
+        
+        save_database(database, output, format)
+
+        print_success(f"Component database saved to {output}")
+
+    except ImportError:
+        print_error("build_component_db.py not found. Make sure it's in the project directory.")
+    except Exception as e:
+        print_error(f"Failed to build database: {e}")
+
 
 @component.command("build-db")
 @click.option("--output", "-o", default="components.json", help="Output file path")
@@ -483,25 +499,7 @@ def component_build_db(ctx, output, format, limit, sdk):
     except FileNotFoundError:
         print_warning("SLC-CLI not found in PATH; proceeding with .slcc file scanning")
 
-    # Import and run the database builder
-    try:
-        from .build_component_db import build_component_database, save_database
-
-        database = build_component_database(limit=limit, sdk_id=sdk)
-        
-        # Use SDK-specific filename if SDK is specified
-        if sdk:
-            output = f".components-{sdk}.json"
-        
-        save_database(database, output, format)
-
-        print_success(f"Component database saved to {output}")
-
-    except ImportError:
-        print_error("build_component_db.py not found. Make sure it's in the project directory.")
-    except Exception as e:
-        print_error(f"Failed to build database: {e}")
-
+    build_database(output, format, limit, sdk)
 
 @component.command("list")
 @click.option("--category", help="Filter by category (e.g., 'Platform|Driver')")
@@ -1749,7 +1747,7 @@ def get_default_sdk() -> Optional[str]:
             # Parse the output to extract SDK ID
             lines = result.stdout.strip().split('\n')
             for line in lines:
-                if 'SDK:' in line or 'ID:' in line:
+                if 'SDK Version:' in line:
                     parts = line.split(':')
                     if len(parts) > 1:
                         sdk_id = parts[1].strip()
@@ -1787,16 +1785,16 @@ def generate_example(ctx):
         
         # Load or create component database for this SDK
         db_path = f".components-{default_sdk}.json"
-        if os.path.exists(db_path):
-            print(f"Loading component database from {db_path}")
-            try:
-                with open(db_path, 'r') as f:
-                    component_db = json.load(f)
-            except Exception as e:
-                print_warning(f"Could not load component database: {e}")
-                component_db = None
-        else:
-            print(f"Component database not found at {db_path}. Run 'silabs component build-db --sdk {default_sdk}' to create it.")
+        if not os.path.exists(db_path):
+            print(f"Building component database in {db_path} ... (patience is a virtue :)")
+            build_database(db_path,format = "json",limit = None,sdk = default_sdk)
+
+        print(f"Loading component database from {db_path}")
+        try:
+            with open(db_path, 'r') as f:
+                component_db = json.load(f)
+        except Exception as e:
+            print_warning(f"Could not load component database: {e}")
             component_db = None
     
     # Launch the curses UI
