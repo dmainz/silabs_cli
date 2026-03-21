@@ -485,7 +485,7 @@ def component_build_db(ctx, output, format, limit, sdk):
 
     # Import and run the database builder
     try:
-        from build_component_db import build_component_database, save_database
+        from .build_component_db import build_component_database, save_database
 
         database = build_component_database(limit=limit, sdk_id=sdk)
         

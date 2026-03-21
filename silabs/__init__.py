@@ -8,5 +8,6 @@ __author__ = "Silicon Labs"
 from .config import Config
 from .tools import ToolManager
 from .utils import run_command, setup_environment
+from .build_component_db import build_component_database, save_database
 
-__all__ = ["Config", "ToolManager", "run_command", "setup_environment"]
+__all__ = ["Config", "ToolManager", "run_command", "setup_environment", "build_component_database", "save_database"]
