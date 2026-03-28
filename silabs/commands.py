@@ -16,7 +16,8 @@ from .tools import ToolManager
 from .utils import (
     run_command, find_project_root, validate_project,
     print_error, print_warning, print_success, get_build_dir,
-    load_slcp_file, save_slcp_file, load_slcc_file, backup_file
+    load_slcp_file, save_slcp_file, load_slcc_file, backup_file,
+    load_yaml_file
 )
 
 
@@ -1365,8 +1366,45 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
         
         elif state == 'settings':
             header = f"Selected: {selected_item}"[:width]
+            item_slcp = load_yaml_file(Path(examples[selected_package][selected_quality][selected_type][selected_item]))
+            description = item_slcp.get("description", "No description available") if item_slcp else "No description available"
+            description = str(description).strip()
+            
+            # Splitting description with natural line breaks first, then fallback to 80-char wrapping
+            desc_lines = []
+            if '\n' in description or '\r' in description:
+                desc_lines = [line.strip() for line in description.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
+            if not desc_lines:
+                words = description.split()
+                current_line = ""
+                for word in words:
+                    if len((current_line + " " + word).strip()) <= 80:
+                        current_line = (current_line + " " + word).strip()
+                    else:
+                        if current_line:
+                            desc_lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    desc_lines.append(current_line)
+            if not desc_lines:
+                desc_lines = ["No description available"]
+            
             stdscr.addstr(0, 0, header, curses.A_BOLD)
             stdscr.addstr(1, 0, "Settings:"[:width])
+            
+            # Display description lines
+            desc_row = 2
+            for i, line in enumerate(desc_lines[:3]):  # Limit to 3 lines max
+                if desc_row >= height - 4:  # Leave plenty of room
+                    break
+                prefix = "Description: " if i == 0 else "            "
+                stdscr.addstr(desc_row, 0, f"{prefix}{line}"[:width])
+                desc_row += 1
+            
+            # Add blank line after description
+            stdscr.addstr(desc_row, 0, ""[:width])
+            desc_row += 1
+            
             menu_items = [
                 "Back",
                 f"Set project name ({inputs.get('project_name', selected_item)})",
@@ -1376,14 +1414,14 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                 f"Set extra switches ({inputs.get('extra_switches', 'none')})",
                 "Generate"
             ]
-            visible_count = height - 4
+            visible_count = height - desc_row - 1  # Adjust for description lines + blank line + status line
             display_items = menu_items[visible_start : visible_start + visible_count]
             for i, item in enumerate(display_items):
-                if 3 + i >= height:
+                if desc_row + i >= height - 1:
                     break
                 attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
                 display = f"  {item}"[:width]
-                stdscr.addstr(3 + i, 0, display, attr)
+                stdscr.addstr(desc_row + i, 0, display, attr)
             
             stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
             
