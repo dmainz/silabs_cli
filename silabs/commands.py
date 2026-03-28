@@ -1142,6 +1142,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
     state = 'packages'
     selected_sdk = default_sdk
     selected_package = None
+    selected_quality = None
     selected_type = None  # 'workspaces' or 'projects'
     selected_item = None
     selected_path = None
@@ -1391,9 +1392,9 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                         key = (typ, name)
                         if key not in seen:
                             seen.add(key)
-                            item_entries.append((typ, name, path))
+                            item_entries.append((quality, typ, name, path))
 
-            menu_items = ["Back"] + [entry[1] for entry in item_entries]
+            menu_items = ["Back"] + [entry[2] for entry in item_entries]
             visible_count = height - 4
             display_items = menu_items[visible_start : visible_start + visible_count]
             for i, item in enumerate(display_items):
@@ -1419,7 +1420,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                     current_idx = search_idx + 1  # Select first package instead of Quit
                     visible_start = 0
                 else:
-                    selected_type, selected_item, selected_path = item_entries[current_idx - 1]
+                    selected_quality, selected_type, selected_item, selected_path = item_entries[current_idx - 1]
                     state = 'settings'
                     current_idx = 0
                     visible_start = 0
@@ -1504,8 +1505,35 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                         visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('\n'):
                 if current_idx == 0:  # Back
+                    # Rebuild item_entries to find the correct index for selected_item
+                    item_entries = []  # (quality, type, name, path)
+                    seen = set()
+                    search_lower = search_string.lower()
+                    for quality in all_qualities:
+                        if quality not in selected_qualities:
+                            continue
+                        if quality not in examples[selected_package]:
+                            continue
+                        for typ in all_types:
+                            if typ not in selected_types:
+                                continue
+                            for name, path in examples[selected_package][quality][typ].items():
+                                if search_lower and search_lower not in name.lower():
+                                    continue
+                                key = (typ, name)
+                                if key not in seen:
+                                    seen.add(key)
+                                    item_entries.append((quality, typ, name, path))
+                    
+                    # Find the index of selected_item in item_entries
+                    selected_idx = 0
+                    for i, (quality, typ, name, path) in enumerate(item_entries):
+                        if name == selected_item:
+                            selected_idx = i
+                            break
+                    
                     state = 'items'
-                    current_idx = items.index(selected_item) + 1  # +1 because Back is at index 0
+                    current_idx = selected_idx + 1  # +1 because Back is at index 0
                     visible_start = max(0, current_idx - visible_count + 1)
                 elif current_idx == 1:  # Set project name
                     stdscr.clear()
@@ -1580,8 +1608,35 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                         stdscr.refresh()
                         stdscr.getch()
             elif key == ord('b') or key == ord('B'):
+                # Rebuild item_entries to find the correct index for selected_item
+                item_entries = []  # (quality, type, name, path)
+                seen = set()
+                search_lower = search_string.lower()
+                for quality in all_qualities:
+                    if quality not in selected_qualities:
+                        continue
+                    if quality not in examples[selected_package]:
+                        continue
+                    for typ in all_types:
+                        if typ not in selected_types:
+                            continue
+                        for name, path in examples[selected_package][quality][typ].items():
+                            if search_lower and search_lower not in name.lower():
+                                continue
+                            key = (typ, name)
+                            if key not in seen:
+                                seen.add(key)
+                                item_entries.append((quality, typ, name, path))
+                
+                # Find the index of selected_item in item_entries
+                selected_idx = 0
+                for i, (quality, typ, name, path) in enumerate(item_entries):
+                    if name == selected_item:
+                        selected_idx = i
+                        break
+                
                 state = 'items'
-                current_idx = items.index(selected_item) + 1  # +1 because Back is at index 0
+                current_idx = selected_idx + 1  # +1 because Back is at index 0
                 visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('q'):
                 break
