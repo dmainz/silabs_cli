@@ -1146,6 +1146,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
     selected_item = None
     selected_path = None
     inputs = {'output_type': 'vscode'}  # default
+    search_string = ""
+    search_mode = False
 
     # Collect unique quality and type values
     all_qualities = sorted({quality for pkg_data in examples.values() for quality in pkg_data.keys()})
@@ -1177,14 +1179,27 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
         height, width = stdscr.getmaxyx()
         
         if state == 'packages':
-            # Build filtered package list based on selected qualities/types
+            # Build filtered package list based on selected qualities/types and search string
             filtered_packages = []
+            search_lower = search_string.lower()
             for pkg in packages:
-                if any(
-                    quality in selected_qualities and typ in selected_types and examples[pkg][quality][typ]
-                    for quality in examples[pkg]
-                    for typ in examples[pkg][quality]
-                ):
+                # Check if package has items matching quality/type filters and search string
+                has_matching_items = False
+                for quality in examples[pkg]:
+                    if quality not in selected_qualities:
+                        continue
+                    for typ in examples[pkg][quality]:
+                        if typ not in selected_types:
+                            continue
+                        for name in examples[pkg][quality][typ]:
+                            if not search_lower or search_lower in name.lower():
+                                has_matching_items = True
+                                break
+                        if has_matching_items:
+                            break
+                    if has_matching_items:
+                        break
+                if has_matching_items:
                     filtered_packages.append(pkg)
 
             stdscr.addstr(0, 0, f"Active SDK: {selected_sdk or 'none'}"[:width])
@@ -1218,13 +1233,27 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                 stdscr.addstr(line, 0, f"  {selected} Type ({typ.title()})"[:width], attr)
                 line += 1
 
+            # Display search string field
+            search_idx = type_start_idx + len(all_types)
+            search_line = line  # Store the search field line number
+            if search_mode:
+                # In search mode, show cursor and don't highlight the whole line
+                display_text = f"Search string: {search_string}"[:width]
+                stdscr.addstr(line, 0, display_text, curses.A_NORMAL)
+                # Cursor will be positioned after navigation text below
+            else:
+                curses.curs_set(0)  # Hide cursor
+                attr = curses.A_REVERSE if current_idx == search_idx else curses.A_NORMAL
+                stdscr.addstr(line, 0, f"Search string: {search_string}"[:width], attr)
+            line += 1
+
             stdscr.addstr(line, 0, "Packages:"[:width], curses.A_BOLD)
             line += 1
 
             # Display packages
             package_start_line = line
             max_packages_display = height - package_start_line - 1
-            package_index_start = fixed_count + len(all_qualities) + len(all_types)
+            package_index_start = search_idx + 1
             for k, pkg in enumerate(filtered_packages[visible_start : visible_start + max_packages_display]):
                 idx = package_index_start + k
                 attr = curses.A_REVERSE if idx == current_idx else curses.A_NORMAL
@@ -1232,71 +1261,110 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
 
             stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Toggle/Select  Space: Toggle  q: quit"[:width])
 
+            # Re-position cursor for search mode after navigation text
+            if search_mode:
+                display_text = f"Search string: {search_string}"[:width]
+                cursor_x = len(f"Search string: {search_string}")
+                if cursor_x >= width:
+                    cursor_x = width - 1
+                stdscr.move(search_line, cursor_x)
+                curses.curs_set(1)
+                stdscr.refresh()
+
             total_options = package_index_start + len(filtered_packages)
             key = stdscr.getch()
-            if key == curses.KEY_UP and current_idx > 0:
-                current_idx -= 1
-                if current_idx >= package_index_start:
-                    pkg_idx = current_idx - package_index_start
-                    if pkg_idx < visible_start:
-                        visible_start = pkg_idx
-            elif key == curses.KEY_DOWN and current_idx < total_options - 1:
-                current_idx += 1
-                if current_idx >= package_index_start:
-                    pkg_idx = current_idx - package_index_start
-                    if pkg_idx >= visible_start + max_packages_display:
-                        visible_start = pkg_idx - max_packages_display + 1
-            elif key == ord('\n'):
-                if current_idx == 0:
-                    break
-                elif current_idx == 1:
-                    state = 'change_sdk'
-                    current_idx = 0
-                    visible_start = 0
-                elif current_idx < type_start_idx:
-                    q_idx = current_idx - fixed_count
-                    quality = all_qualities[q_idx]
-                    if quality in selected_qualities:
-                        selected_qualities.remove(quality)
-                    else:
-                        selected_qualities.add(quality)
-                elif current_idx < package_index_start:
-                    t_idx = current_idx - type_start_idx
-                    typ = all_types[t_idx]
-                    if typ in selected_types:
-                        selected_types.remove(typ)
-                    else:
-                        selected_types.add(typ)
+            
+            # Handle search mode input
+            navigation_key_after_exit = None
+            if search_mode:
+                if key == curses.KEY_BACKSPACE or key == 127:
+                    search_string = search_string[:-1]
+                elif key == ord('\n'):
+                    search_mode = False
+                elif key == curses.KEY_UP or key == curses.KEY_DOWN:
+                    search_mode = False
+                    navigation_key_after_exit = key
+                elif 32 <= key <= 126:
+                    search_string += chr(key)
                 else:
-                    pkg_idx = current_idx - package_index_start
-                    if pkg_idx < len(filtered_packages):
-                        selected_package = filtered_packages[pkg_idx]
-                        state = 'items'
+                    continue  # Ignore other keys in search mode
+            
+            # Handle navigation (either from normal mode or after exiting search mode)
+            if not search_mode:
+                current_key = navigation_key_after_exit if navigation_key_after_exit else key
+                if current_key == curses.KEY_UP and current_idx > 0:
+                    current_idx -= 1
+                    if current_idx >= package_index_start:
+                        pkg_idx = current_idx - package_index_start
+                        if pkg_idx < visible_start:
+                            visible_start = pkg_idx
+                    # Auto-enter search mode when navigating to search field
+                    if current_idx == search_idx:
+                        search_mode = True
+                elif current_key == curses.KEY_DOWN and current_idx < total_options - 1:
+                    current_idx += 1
+                    if current_idx >= package_index_start:
+                        pkg_idx = current_idx - package_index_start
+                        if pkg_idx >= visible_start + max_packages_display:
+                            visible_start = pkg_idx - max_packages_display + 1
+                    # Auto-enter search mode when navigating to search field
+                    if current_idx == search_idx:
+                        search_mode = True
+                elif current_key == ord('\n'):
+                    if current_idx == 0:
+                        break
+                    elif current_idx == 1:
+                        state = 'change_sdk'
                         current_idx = 0
                         visible_start = 0
-            elif key == ord(' '):
-                if current_idx == 0 or current_idx == 1:
-                    pass
-                elif current_idx < type_start_idx:
-                    q_idx = current_idx - fixed_count
-                    quality = all_qualities[q_idx]
-                    if quality in selected_qualities:
-                        selected_qualities.remove(quality)
+                    elif current_idx == search_idx:
+                        search_mode = True
+                    elif current_idx < type_start_idx:
+                        q_idx = current_idx - fixed_count
+                        quality = all_qualities[q_idx]
+                        if quality in selected_qualities:
+                            selected_qualities.remove(quality)
+                        else:
+                            selected_qualities.add(quality)
+                    elif current_idx < search_idx:
+                        t_idx = current_idx - type_start_idx
+                        typ = all_types[t_idx]
+                        if typ in selected_types:
+                            selected_types.remove(typ)
+                        else:
+                            selected_types.add(typ)
                     else:
-                        selected_qualities.add(quality)
-                elif current_idx < package_index_start:
-                    t_idx = current_idx - type_start_idx
-                    typ = all_types[t_idx]
-                    if typ in selected_types:
-                        selected_types.remove(typ)
-                    else:
-                        selected_types.add(typ)
-            elif key == ord('b') or key == ord('B'):
-                state = 'packages'
-                current_idx = 0
-                visible_start = 0
-            elif key == ord('q'):
-                break
+                        pkg_idx = current_idx - package_index_start
+                        if pkg_idx < len(filtered_packages):
+                            selected_package = filtered_packages[pkg_idx]
+                            state = 'items'
+                            current_idx = 0
+                            visible_start = 0
+                elif current_key == ord(' '):
+                    if current_idx == 0 or current_idx == 1:
+                        pass
+                    elif current_idx == search_idx:
+                        pass
+                    elif current_idx < type_start_idx:
+                        q_idx = current_idx - fixed_count
+                        quality = all_qualities[q_idx]
+                        if quality in selected_qualities:
+                            selected_qualities.remove(quality)
+                        else:
+                            selected_qualities.add(quality)
+                    elif current_idx < search_idx:
+                        t_idx = current_idx - type_start_idx
+                        typ = all_types[t_idx]
+                        if typ in selected_types:
+                            selected_types.remove(typ)
+                        else:
+                            selected_types.add(typ)
+                elif current_key == ord('b') or current_key == ord('B'):
+                    state = 'packages'
+                    current_idx = 0
+                    visible_start = 0
+                elif current_key == ord('q'):
+                    break
         
 
         
@@ -1305,9 +1373,10 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
             stdscr.addstr(0, 0, header, curses.A_BOLD)
             stdscr.addstr(1, 0, "Select Item:"[:width])
 
-            # Build items from selected quality/type filters
+            # Build items from selected quality/type filters and search string
             item_entries = []  # (type, name, path)
             seen = set()
+            search_lower = search_string.lower()
             for quality in all_qualities:
                 if quality not in selected_qualities:
                     continue
@@ -1317,12 +1386,14 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                     if typ not in selected_types:
                         continue
                     for name, path in examples[selected_package][quality][typ].items():
+                        if search_lower and search_lower not in name.lower():
+                            continue
                         key = (typ, name)
                         if key not in seen:
                             seen.add(key)
                             item_entries.append((typ, name, path))
 
-            menu_items = ["Back"] + [f"{entry[0].title()}: {entry[1]}" for entry in item_entries]
+            menu_items = ["Back"] + [entry[1] for entry in item_entries]
             visible_count = height - 4
             display_items = menu_items[visible_start : visible_start + visible_count]
             for i, item in enumerate(display_items):
@@ -1345,7 +1416,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
             elif key == ord('\n'):
                 if current_idx == 0:
                     state = 'packages'
-                    current_idx = 0
+                    current_idx = search_idx + 1  # Select first package instead of Quit
                     visible_start = 0
                 else:
                     selected_type, selected_item, selected_path = item_entries[current_idx - 1]
@@ -1354,7 +1425,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                     visible_start = 0
             elif key == ord('b') or key == ord('B'):
                 state = 'packages'
-                current_idx = 0
+                current_idx = search_idx + 1  # Select first package instead of Quit
                 visible_start = 0
             elif key == ord('q'):
                 break
