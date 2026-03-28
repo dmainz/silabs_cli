@@ -1142,18 +1142,33 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
     state = 'packages'
     selected_sdk = default_sdk
     selected_package = None
-    selected_quality = None
     selected_type = None  # 'workspaces' or 'projects'
     selected_item = None
+    selected_path = None
     inputs = {'output_type': 'vscode'}  # default
+
+    # Collect unique quality and type values
+    all_qualities = sorted({quality for pkg_data in examples.values() for quality in pkg_data.keys()})
+    all_types = sorted({t for pkg_data in examples.values() for quality_data in pkg_data.values() for t in quality_data.keys() if quality_data[t]})
+    
+    # Set defaults: Production quality and projects type (case-insensitive matching)
+    selected_qualities = set()
+    for q in all_qualities:
+        if q.upper() == 'PRODUCTION':
+            selected_qualities.add(q)
+            break
+    
+    selected_types = set()
+    for t in all_types:
+        if t.lower() == 'projects':
+            selected_types.add(t)
+            break
 
     # Apply initial inputs
     if initial_inputs:
         inputs.update(initial_inputs)
 
     visible_start = 0
-    
-    
     packages = list(examples.keys())
     current_idx = 0
     
@@ -1162,211 +1177,191 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
         height, width = stdscr.getmaxyx()
         
         if state == 'packages':
-            stdscr.addstr(0, 0, f"SDK: ({selected_sdk or 'none'})"[:width])
-            stdscr.addstr(3, 0, "Select Package:"[:width], curses.A_BOLD)
-            menu_items = ["Change SDK", "Quit"] + packages
-            package_start_line = 4
-            max_packages_display = height - package_start_line
-            
-            # Display fixed items (Change SDK and Quit)
-            for i in range(2):
-                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                display = f"  {menu_items[i]}"[:width]
-                stdscr.addstr(1 + i, 0, display, attr)
-            
+            # Build filtered package list based on selected qualities/types
+            filtered_packages = []
+            for pkg in packages:
+                if any(
+                    quality in selected_qualities and typ in selected_types and examples[pkg][quality][typ]
+                    for quality in examples[pkg]
+                    for typ in examples[pkg][quality]
+                ):
+                    filtered_packages.append(pkg)
+
+            stdscr.addstr(0, 0, f"Active SDK: {selected_sdk or 'none'}"[:width])
+
+            fixed_items = ["Quit", "Change SDK"]
+            fixed_count = len(fixed_items)
+            line = 2
+
+            # Display fixed items (Quit, Change SDK)
+            for i, item in enumerate(fixed_items):
+                attr = curses.A_REVERSE if current_idx == i else curses.A_NORMAL
+                stdscr.addstr(line, 0, item[:width], attr)
+                line += 1
+
+            # Section header
+            stdscr.addstr(line, 0, "Filter by Quality and Type:"[:width])
+            line += 1
+
+            # Display quality filters
+            for i, quality in enumerate(all_qualities):
+                selected = '[x]' if quality in selected_qualities else '[ ]'
+                attr = curses.A_REVERSE if current_idx == fixed_count + i else curses.A_NORMAL
+                stdscr.addstr(line, 0, f"  {selected} Quality ({quality})"[:width], attr)
+                line += 1
+
+            # Display type filters
+            type_start_idx = fixed_count + len(all_qualities)
+            for j, typ in enumerate(all_types):
+                selected = '[x]' if typ in selected_types else '[ ]'
+                attr = curses.A_REVERSE if current_idx == type_start_idx + j else curses.A_NORMAL
+                stdscr.addstr(line, 0, f"  {selected} Type ({typ.title()})"[:width], attr)
+                line += 1
+
+            stdscr.addstr(line, 0, "Packages:"[:width], curses.A_BOLD)
+            line += 1
+
             # Display packages
-            display_packages = packages[visible_start : visible_start + max_packages_display]
-            for j, package in enumerate(display_packages):
-                menu_idx = 2 + visible_start + j
-                attr = curses.A_REVERSE if menu_idx == current_idx else curses.A_NORMAL
-                display = f"  {package}"[:width]
-                stdscr.addstr(package_start_line + j, 0, display, attr)
-            
-            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  q: quit  s: change SDK"[:width])
-            
+            package_start_line = line
+            max_packages_display = height - package_start_line - 1
+            package_index_start = fixed_count + len(all_qualities) + len(all_types)
+            for k, pkg in enumerate(filtered_packages[visible_start : visible_start + max_packages_display]):
+                idx = package_index_start + k
+                attr = curses.A_REVERSE if idx == current_idx else curses.A_NORMAL
+                stdscr.addstr(package_start_line + k, 0, f"  {pkg}"[:width], attr)
+
+            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Toggle/Select  Space: Toggle  q: quit"[:width])
+
+            total_options = package_index_start + len(filtered_packages)
             key = stdscr.getch()
-            if key == curses.KEY_UP:
-                if current_idx > 0:
-                    current_idx -= 1
-                    if current_idx >= 2 and current_idx - 2 < visible_start:
-                        visible_start = current_idx - 2
-            elif key == curses.KEY_DOWN:
-                if current_idx < len(menu_items) - 1:
-                    current_idx += 1
-                    if current_idx >= 2:
-                        package_idx = current_idx - 2
-                        if package_idx >= visible_start + max_packages_display:
-                            visible_start = max(0, package_idx - max_packages_display + 1)
+            if key == curses.KEY_UP and current_idx > 0:
+                current_idx -= 1
+                if current_idx >= package_index_start:
+                    pkg_idx = current_idx - package_index_start
+                    if pkg_idx < visible_start:
+                        visible_start = pkg_idx
+            elif key == curses.KEY_DOWN and current_idx < total_options - 1:
+                current_idx += 1
+                if current_idx >= package_index_start:
+                    pkg_idx = current_idx - package_index_start
+                    if pkg_idx >= visible_start + max_packages_display:
+                        visible_start = pkg_idx - max_packages_display + 1
             elif key == ord('\n'):
-                if current_idx == 0:  # Change SDK
-                    if available_sdks:
-                        state = 'change_sdk'
-                        current_idx = 0
-                        visible_start = 0
-                    else:
-                        stdscr.addstr(height-1, 0, "No SDKs available"[:width])
-                        stdscr.refresh()
-                        stdscr.getch()
-                elif current_idx == 1:  # Quit
+                if current_idx == 0:
                     break
-                else:  # Package
-                    selected_package = packages[current_idx - 2]
-                    state = 'qualities'
-                    qualities = list(examples[selected_package].keys())
-                    current_idx = 0
-                    visible_start = 0
-            elif key == ord('s') or key == ord('S'):
-                if available_sdks:
+                elif current_idx == 1:
                     state = 'change_sdk'
                     current_idx = 0
                     visible_start = 0
+                elif current_idx < type_start_idx:
+                    q_idx = current_idx - fixed_count
+                    quality = all_qualities[q_idx]
+                    if quality in selected_qualities:
+                        selected_qualities.remove(quality)
+                    else:
+                        selected_qualities.add(quality)
+                elif current_idx < package_index_start:
+                    t_idx = current_idx - type_start_idx
+                    typ = all_types[t_idx]
+                    if typ in selected_types:
+                        selected_types.remove(typ)
+                    else:
+                        selected_types.add(typ)
                 else:
-                    stdscr.addstr(height-1, 0, "No SDKs available"[:width])
-                    stdscr.refresh()
-                    stdscr.getch()
-            elif key == ord('q'):
-                break
-        
-        elif state == 'qualities':
-            header = f"Package: {selected_package}"[:width]
-            stdscr.addstr(0, 0, header, curses.A_BOLD)
-            stdscr.addstr(1, 0, "Select Quality:"[:width])
-            qualities = list(examples[selected_package].keys())
-            menu_items = qualities + ["Back"]
-            for i, item in enumerate(menu_items):
-                if 3 + i >= height:
-                    break
-                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                display = f"  {item}"[:width]
-                stdscr.addstr(3 + i, 0, display, attr)
-            
-            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
-            
-            key = stdscr.getch()
-            if key == curses.KEY_UP and current_idx > 0:
-                current_idx -= 1
-            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
-                current_idx += 1
-            elif key == ord('\n'):
-                if current_idx < len(qualities):
-                    selected_quality = qualities[current_idx]
-                    state = 'type'
-                    current_idx = 0
-                else:
-                    state = 'packages'
-                    current_idx = packages.index(selected_package) + 2
-                    max_packages_display = height - 4
-                    visible_start = max(0, (current_idx - 2) - max_packages_display + 1)
+                    pkg_idx = current_idx - package_index_start
+                    if pkg_idx < len(filtered_packages):
+                        selected_package = filtered_packages[pkg_idx]
+                        state = 'items'
+                        current_idx = 0
+                        visible_start = 0
+            elif key == ord(' '):
+                if current_idx == 0 or current_idx == 1:
+                    pass
+                elif current_idx < type_start_idx:
+                    q_idx = current_idx - fixed_count
+                    quality = all_qualities[q_idx]
+                    if quality in selected_qualities:
+                        selected_qualities.remove(quality)
+                    else:
+                        selected_qualities.add(quality)
+                elif current_idx < package_index_start:
+                    t_idx = current_idx - type_start_idx
+                    typ = all_types[t_idx]
+                    if typ in selected_types:
+                        selected_types.remove(typ)
+                    else:
+                        selected_types.add(typ)
             elif key == ord('b') or key == ord('B'):
                 state = 'packages'
-                current_idx = packages.index(selected_package) + 2
-                max_packages_display = height - 4
-                visible_start = max(0, (current_idx - 2) - max_packages_display + 1)
+                current_idx = 0
+                visible_start = 0
             elif key == ord('q'):
                 break
         
-        elif state == 'type':
-            header = f"Package: {selected_package} > Quality: {selected_quality}"[:width]
-            stdscr.addstr(0, 0, header, curses.A_BOLD)
-            stdscr.addstr(1, 0, "Select Type:"[:width])
-            types = []
-            if examples[selected_package][selected_quality]['projects']:
-                types.append('projects')
-            if examples[selected_package][selected_quality]['workspaces']:
-                types.append('workspaces')
-            
-            menu_items = types + ["Back"]
-            for i, item in enumerate(menu_items):
-                if 3 + i >= height:
-                    break
-                attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                display_item = item.title() if item != "Back" else item
-                display = f"  {display_item}"[:width]
-                stdscr.addstr(3 + i, 0, display, attr)
-            
-            stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
-            
-            key = stdscr.getch()
-            if key == curses.KEY_UP and current_idx > 0:
-                current_idx -= 1
-            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
-                current_idx += 1
-            elif key == ord('\n'):
-                if current_idx < len(types):
-                    selected_type = types[current_idx]
-                    state = 'items'
-                    items = list(examples[selected_package][selected_quality][selected_type].keys())
-                    current_idx = 0
-                    visible_start = 0
-                else:
-                    state = 'qualities'
-                    visible_start = 0
-                    current_idx = qualities.index(selected_quality)
-            elif key == ord('b') or key == ord('B'):
-                state = 'qualities'
-                visible_start = 0
-                current_idx = qualities.index(selected_quality)
-            elif key == ord('q'):
-                break
+
         
         elif state == 'items':
-            header = f"Package: {selected_package} > Quality: {selected_quality} > {selected_type.title()}"[:width]
+            header = f"Package: {selected_package}"[:width]
             stdscr.addstr(0, 0, header, curses.A_BOLD)
             stdscr.addstr(1, 0, "Select Item:"[:width])
-            items = list(examples[selected_package][selected_quality][selected_type].keys())
-            menu_items = ["Back"] + items
+
+            # Build items from selected quality/type filters
+            item_entries = []  # (type, name, path)
+            seen = set()
+            for quality in all_qualities:
+                if quality not in selected_qualities:
+                    continue
+                if quality not in examples[selected_package]:
+                    continue
+                for typ in all_types:
+                    if typ not in selected_types:
+                        continue
+                    for name, path in examples[selected_package][quality][typ].items():
+                        key = (typ, name)
+                        if key not in seen:
+                            seen.add(key)
+                            item_entries.append((typ, name, path))
+
+            menu_items = ["Back"] + [f"{entry[0].title()}: {entry[1]}" for entry in item_entries]
             visible_count = height - 4
             display_items = menu_items[visible_start : visible_start + visible_count]
             for i, item in enumerate(display_items):
                 if 3 + i >= height:
                     break
                 attr = curses.A_REVERSE if visible_start + i == current_idx else curses.A_NORMAL
-                display = f"  {item}"[:width]
-                stdscr.addstr(3 + i, 0, display, attr)
-            
+                stdscr.addstr(3 + i, 0, f"  {item}"[:width], attr)
+
             stdscr.addstr(height-1, 0, "↑/↓: Navigate  Enter: Select  b: back  q: quit"[:width])
-            
+
             key = stdscr.getch()
-            if key == curses.KEY_UP:
-                if current_idx > 0:
-                    current_idx -= 1
-                    if current_idx < visible_start:
-                        visible_start = current_idx
-            elif key == curses.KEY_DOWN:
-                if current_idx < len(menu_items) - 1:
-                    current_idx += 1
-                    if current_idx >= visible_start + visible_count:
-                        visible_start = max(0, current_idx - visible_count + 1)
+            if key == curses.KEY_UP and current_idx > 0:
+                current_idx -= 1
+                if current_idx < visible_start:
+                    visible_start = current_idx
+            elif key == curses.KEY_DOWN and current_idx < len(menu_items) - 1:
+                current_idx += 1
+                if current_idx >= visible_start + visible_count:
+                    visible_start = max(0, current_idx - visible_count + 1)
             elif key == ord('\n'):
-                if current_idx == 0:  # Back
-                    state = 'type'
+                if current_idx == 0:
+                    state = 'packages'
+                    current_idx = 0
                     visible_start = 0
-                    types = []
-                    if examples[selected_package][selected_quality]['workspaces']:
-                        types.append('workspaces')
-                    if examples[selected_package][selected_quality]['projects']:
-                        types.append('projects')
-                    current_idx = types.index(selected_type)
-                else:  # Items
-                    selected_item = items[current_idx - 1]  # -1 because Back is at index 0
+                else:
+                    selected_type, selected_item, selected_path = item_entries[current_idx - 1]
                     state = 'settings'
                     current_idx = 0
                     visible_start = 0
             elif key == ord('b') or key == ord('B'):
-                state = 'type'
+                state = 'packages'
+                current_idx = 0
                 visible_start = 0
-                types = []
-                if examples[selected_package][selected_quality]['workspaces']:
-                    types.append('workspaces')
-                if examples[selected_package][selected_quality]['projects']:
-                    types.append('projects')
-                current_idx = types.index(selected_type)
             elif key == ord('q'):
                 break
         
         elif state == 'settings':
             header = f"Selected: {selected_item}"[:width]
-            item_slcp = load_yaml_file(Path(examples[selected_package][selected_quality][selected_type][selected_item]))
+            item_slcp = load_yaml_file(Path(selected_path))
             description = item_slcp.get("description", "No description available") if item_slcp else "No description available"
             description = str(description).strip()
             
