@@ -106,9 +106,15 @@ export GCC_ARM_NONE_EABI="$GCC_PATH"
 
 # Get Python from SLT (use system python as fallback)
 PYTHON_PATH="$("$SLT_CLI" where python 2>/dev/null || echo '')"
-if [ -n "$PYTHON_PATH" ]; then
+# Test if the silabs python3 can import curses
+$PYTHON_PATH/bin/python3 -c "import curses" 2>/dev/null
+IMPORT_ERROR=$?
+
+if [ -n "$PYTHON_PATH" -a $IMPORT_ERROR -eq 0 ]; then
+    echo "Using Silabs python because IMPORT_ERROR = $IMPORT_ERROR"
     export SILABS_PYTHON="$PYTHON_PATH/bin/python3"
 else
+    echo "Using system python because IMPORT_ERROR = $IMPORT_ERROR"
     export SILABS_PYTHON=$(which python3 || echo 'python3')
 fi
 
