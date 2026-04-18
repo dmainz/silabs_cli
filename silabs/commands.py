@@ -44,10 +44,11 @@ def silabs(ctx, project_dir, build_dir, verbose):
     
     if project_root and validate_project(project_root):
         ctx.obj["project_root"] = project_root
-        ctx.obj["build_dir"] = get_build_dir(
-            project_root,
-            Path(build_dir) if build_dir else None
-        )
+        # Default to cmake_gcc/build subdirectory if build_dir not specified
+        if build_dir:
+            ctx.obj["build_dir"] = Path(build_dir)
+        else:
+            ctx.obj["build_dir"] = project_root / "cmake_gcc" / "build"
     else:
         ctx.obj["project_root"] = None
         ctx.obj["build_dir"] = None
@@ -79,10 +80,59 @@ def build(ctx):
     tool_manager = ctx.obj["tool_manager"]
     verbose = ctx.obj["verbose"]
     
+    # Ensure build directory exists and is configured
+    if not build_dir.exists():
+        print_success(f"Creating build directory: {build_dir}")
+        build_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Check if cmake configuration is needed (build.ninja doesn't exist)
+    preset_root = project_root / "cmake_gcc"
+    preset_file = preset_root / "CMakePresets.json"
+    use_presets = preset_file.exists()
+
+    if not (build_dir / "build.ninja").exists():
+        print_success("Generating build configuration with cmake...")
+        env = tool_manager.get_environment()
+
+        if use_presets:
+            print_success(f"Using CMake presets from: {preset_file}")
+            cmd = f"cd {preset_root} && cmake --preset project"
+        else:
+            toolchain_file = preset_root / "toolchain.cmake"
+            toolchain_arg = ''
+            if toolchain_file.exists():
+                toolchain_arg = f'-DCMAKE_TOOLCHAIN_FILE="{toolchain_file}"'
+                print_success(f"Using toolchain file: {toolchain_file}")
+
+            cmd = f"cd {build_dir} && cmake .. -G Ninja {toolchain_arg}".strip()
+
+        exit_code, stdout, stderr = run_command(
+            cmd,
+            env=env,
+            verbose=verbose,
+            capture_output=True
+        )
+        
+        if exit_code != 0:
+            print_error(f"CMake configuration failed with exit code {exit_code}")
+            if stdout:
+                print("STDOUT:", stdout)
+            if stderr:
+                print("STDERR:", stderr)
+            return
+        
+        if verbose and stdout:
+            print(stdout)
+    
     print_success(f"Building {project_root.name}")
     
     env = tool_manager.get_environment()
-    cmd = f"cd {build_dir} && cmake {project_root} && ninja"
+    if use_presets:
+        # Use cmake --build so CMake knows to run custom commands and proper targets.
+        cmd = f"cd {preset_root} && cmake --build . --preset default_config --target all"
+    else:
+        # Prefer cmake --build over raw ninja so custom commands are honored in the generated build tree.
+        cmd = f"cd {build_dir} && cmake --build . --target all"
     
     exit_code, stdout, stderr = run_command(
         cmd,
@@ -167,8 +217,23 @@ def reconfigure(ctx):
     
     # Run CMake configuration
     env = tool_manager.get_environment()
-    cmd = f"cd {build_dir} && cmake {project_root}"
-    
+
+    preset_root = project_root / "cmake_gcc"
+    preset_file = preset_root / "CMakePresets.json"
+    use_presets = preset_file.exists()
+
+    if use_presets:
+        print_success(f"Using CMake presets from: {preset_file}")
+        cmd = f"cd {preset_root} && cmake --preset project"
+    else:
+        toolchain_file = project_root / "cmake_gcc" / "toolchain.cmake"
+        toolchain_arg = ''
+        if toolchain_file.exists():
+            toolchain_arg = f'-DCMAKE_TOOLCHAIN_FILE="{toolchain_file}"'
+            print_success(f"Using toolchain file: {toolchain_file}")
+
+        cmd = f"cd {build_dir} && cmake .. -G Ninja {toolchain_arg}".strip()
+
     exit_code, stdout, stderr = run_command(
         cmd,
         env=env,
@@ -941,7 +1006,7 @@ def create_project(ctx, name, sdk, target):
 
     # If project was generated successfully, create the slconf file
     if result and result.get('success'):
-        project_dir = result.get('project_dir')
+        project_dir = f"{result.get('project_dir')}/{result.get('project_name')}"
         if project_dir and os.path.exists(project_dir):
             create_project_slconf(project_dir, selected_sdk, selected_sdk_path, tool_manager)
 
@@ -1600,8 +1665,8 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
                     if inputs.get('board_device'):
                         if not inputs.get('project_name'):
                             inputs['project_name'] = selected_item
-                        generate_command(slc_path, examples[selected_package][selected_quality][selected_type][selected_item], inputs, env)
-                        break
+                        gen_result = generate_command(slc_path, examples[selected_package][selected_quality][selected_type][selected_item], inputs, env)
+                        return gen_result
                     else:
                         stdscr.clear()
                         stdscr.addstr(0, 0, "Board/Device is required. Press any key to continue.")
@@ -1707,7 +1772,7 @@ def example_finder_ui(stdscr, slc_path: str, env: Dict[str, str], default_sdk: O
 
 
 def generate_command(slc_path: str, example_path: str, inputs: Dict[str, str], env: Dict[str, str]):
-    """Generate the slc command"""
+    """Generate the slc command and return project information"""
     # Set default project_dir if not set
     if not inputs.get('project_dir'):
         project_name = Path(example_path).stem
@@ -1735,10 +1800,16 @@ def generate_command(slc_path: str, example_path: str, inputs: Dict[str, str], e
     result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
     if result.returncode == 0:
         print_success("Project generated successfully")
+        return {
+            'success': True,
+            'project_dir': inputs.get('project_dir'),
+            'project_name': inputs.get('project_name')
+        }
     else:
         print_error("Project generation failed")
         print("STDOUT:", result.stdout)
         print("STDERR:", result.stderr)
+        return {'success': False}
 
 
 def select_board_device(stdscr, component_db: Optional[Dict[str, Any]], current_selection: str = "") -> Optional[str]:
